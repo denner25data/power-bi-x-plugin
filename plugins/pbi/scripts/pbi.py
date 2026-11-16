@@ -11,6 +11,7 @@ Subcomandos:
   relatorio <arquivo>   páginas, visuais e os campos de cada visual
   modelo <arquivo>      tabelas, medidas, colunas calculadas, relações, M e fontes
   linhagem <arquivo>    de cada visual até a fonte: medidas, colunas, tabelas, M; e o que não é usado
+  revisar <arquivo>     regras de boas práticas (achados por severidade, com o que corrigir)
 
 Opções de relatorio e modelo: --json (saída em JSON) e --tudo (inclui as tabelas
 automáticas de data/hora).
@@ -253,6 +254,36 @@ def descrever_campo(expr: dict, apelidos: dict | None = None) -> dict:
     return {"campo": json.dumps(expr, ensure_ascii=False)[:80], "tipo": "outro"}
 
 
+def campos_em(obj) -> list[dict]:
+    """Acha os campos (Tabela[Campo]) citados em qualquer JSON de filtro do Power BI."""
+    achados = []
+
+    def anda(no):
+        if isinstance(no, str) and no[:1] in "[{":
+            try:
+                anda(json.loads(no))
+            except ValueError:
+                pass
+        elif isinstance(no, dict):
+            for chave in ("Measure", "Column"):
+                alvo = no.get(chave)
+                if isinstance(alvo, dict) and "Entity" in alvo.get("Expression", {}).get("SourceRef", {}):
+                    achados.append(descrever_campo({chave: alvo}))
+            for v in no.values():
+                anda(v)
+        elif isinstance(no, list):
+            for v in no:
+                anda(v)
+
+    anda(obj)
+    vistos, unicos = set(), []
+    for c in achados:
+        if c["campo"] not in vistos:
+            vistos.add(c["campo"])
+            unicos.append(c)
+    return unicos
+
+
 def titulo_visual(objetos: dict) -> str | None:
     try:
         valor = objetos["title"][0]["properties"]["text"]["expr"]["Literal"]["Value"]
@@ -263,12 +294,19 @@ def titulo_visual(objetos: dict) -> str | None:
 
 def relatorio_layout(fonte: Fonte, nome: str) -> dict:
     layout = fonte.json(nome)
-    paginas = []
+    paginas, filtros = [], []
+    if campos_em(layout.get("filters")):
+        filtros.append({"onde": "relatório", "campos": campos_em(layout.get("filters"))})
     for s in sorted(layout.get("sections", []), key=lambda s: s.get("ordinal", 0)):
         cfg_pagina = json.loads(s.get("config") or "{}")
+        if campos_em(s.get("filters")):
+            filtros.append({"onde": f"página {s.get('displayName')}", "campos": campos_em(s.get("filters"))})
         visuais = []
         for vc in s.get("visualContainers", []):
             cfg = json.loads(vc.get("config") or "{}")
+            if campos_em(vc.get("filters")):
+                filtros.append({"onde": f"visual {cfg.get('name')} (página {s.get('displayName')})",
+                                "campos": campos_em(vc.get("filters"))})
             v = {"nome": cfg.get("name"), "x": vc.get("x"), "y": vc.get("y"),
                  "largura": vc.get("width"), "altura": vc.get("height")}
             sv = cfg.get("singleVisual")
@@ -286,7 +324,7 @@ def relatorio_layout(fonte: Fonte, nome: str) -> dict:
         paginas.append({"nome": s.get("name"), "exibicao": s.get("displayName"),
                         "oculta": cfg_pagina.get("visibility") == 1,
                         "largura": s.get("width"), "altura": s.get("height"), "visuais": visuais})
-    return {"formato": "antigo (Report/Layout)", "paginas": paginas}
+    return {"formato": "antigo (Report/Layout)", "paginas": paginas, "filtros": filtros}
 
 
 def relatorio_pbir(fonte: Fonte, base: str) -> dict:
@@ -294,13 +332,22 @@ def relatorio_pbir(fonte: Fonte, base: str) -> dict:
     ordem = fonte.json(f"{base}pages/pages.json").get("pageOrder", [])
     todas = sorted({n.split("/")[len(base.split("/")) ] for n in nomes
                     if n.startswith(f"{base}pages/") and n.endswith("/page.json")})
-    paginas = []
+    paginas, filtros = [], []
+    if fonte.existe(f"{base}report.json"):
+        campos = campos_em(fonte.json(f"{base}report.json").get("filterConfig"))
+        if campos:
+            filtros.append({"onde": "relatório", "campos": campos})
     for p in ordem + [x for x in todas if x not in ordem]:
         pj = fonte.json(f"{base}pages/{p}/page.json")
+        if campos_em(pj.get("filterConfig")):
+            filtros.append({"onde": f"página {pj.get('displayName')}", "campos": campos_em(pj.get("filterConfig"))})
         visuais = []
         prefixo = f"{base}pages/{p}/visuals/"
         for n in sorted(x for x in nomes if x.startswith(prefixo) and x.endswith("/visual.json")):
             vj = fonte.json(n)
+            if campos_em(vj.get("filterConfig")):
+                filtros.append({"onde": f"visual {vj.get('name')} (página {pj.get('displayName')})",
+                                "campos": campos_em(vj.get("filterConfig"))})
             pos = vj.get("position", {})
             v = {"nome": vj.get("name"), "x": pos.get("x"), "y": pos.get("y"),
                  "largura": pos.get("width"), "altura": pos.get("height"), "oculto": vj.get("isHidden", False)}
@@ -317,7 +364,7 @@ def relatorio_pbir(fonte: Fonte, base: str) -> dict:
         paginas.append({"nome": p, "exibicao": pj.get("displayName"),
                         "oculta": pj.get("visibility") == "HiddenInViewMode",
                         "largura": pj.get("width"), "altura": pj.get("height"), "visuais": visuais})
-    return {"formato": "PBIR", "paginas": paginas}
+    return {"formato": "PBIR", "paginas": paginas, "filtros": filtros}
 
 
 def relatorio(alvo: dict) -> dict:
@@ -362,6 +409,10 @@ def relatorio_texto(r: dict, arquivo: str) -> str:
             pos = f"@{v.get('x', 0):.0f},{v.get('y', 0):.0f} {v.get('largura', 0):.0f}x{v.get('altura', 0):.0f}"
             linhas.append(f"   - {v['tipo']}{titulo}{oculto} {pos}: " + ("; ".join(partes) or "sem campos")
                           + f" [{v['nome']}]")
+    if r.get("filtros"):
+        linhas.append("\nFiltros:")
+        for f in r["filtros"]:
+            linhas.append(f"   - {f['onde']}: " + ", ".join(c["campo"] for c in f["campos"]))
     medidas = sorted((c, n) for (c, t), n in uso.items() if t == "medida")
     colunas = sorted((c, n) for (c, t), n in uso.items() if t != "medida")
     linhas.append(f"\nCampos usados: {len(medidas)} medidas, {len(colunas)} colunas")
@@ -440,6 +491,7 @@ def modelo_pbix(caminho: Path) -> dict:
                             "descricao": None if vazio(ms.get("Description")) else ms["Description"]})
         tabelas.append({"nome": nome, "automatica": bool(AUTOMATICAS.match(nome)),
                         "oculta": bool(t.get("IsHidden")),
+                        "categoria": None if vazio(t.get("DataCategory")) else t.get("DataCategory"),
                         "descricao": None if vazio(t.get("Description")) else t["Description"],
                         "colunas": colunas, "medidas": medidas,
                         "m": m_por_tabela.get(nome), "dax": dax_tabela.get(nome)})
@@ -485,6 +537,7 @@ def modelo_pbit(z: zipfile.ZipFile) -> dict:
                 dax = juntar(src.get("expression"))
         tabelas.append({"nome": t["name"], "automatica": bool(AUTOMATICAS.match(t["name"])),
                         "oculta": bool(t.get("isHidden")), "descricao": t.get("description"),
+                        "categoria": t.get("dataCategory"),
                         "colunas": colunas, "medidas": medidas, "m": m_txt, "dax": dax})
     relacoes = []
     for r in esquema.get("relationships", []):
@@ -549,7 +602,7 @@ def tabela_tmdl(texto_tmdl: str) -> dict | None:
             descricao = []
             if tipo == "table" and nivel == 0:
                 tabela = {"nome": nome, "automatica": bool(AUTOMATICAS.match(nome)), "oculta": False,
-                          "descricao": desc, "colunas": [], "medidas": [], "m": None, "dax": None}
+                          "descricao": desc, "categoria": None, "colunas": [], "medidas": [], "m": None, "dax": None}
                 objeto, i = tabela, i + 1
                 continue
             if tabela is None:
@@ -587,6 +640,8 @@ def tabela_tmdl(texto_tmdl: str) -> dict | None:
                 tabela["oculta"] = True
             elif chave == "formatString" and "formato" in objeto:
                 objeto["formato"] = valor
+            elif chave == "dataCategory" and objeto is tabela:
+                tabela["categoria"] = valor
             elif chave == "displayFolder" and "pasta" in objeto:
                 objeto["pasta"] = valor
             elif chave == "dataType" and "tipo_dado" in objeto:
@@ -685,8 +740,9 @@ def modelo_texto(d: dict, arquivo: str, tudo: bool) -> str:
             linhas.append(f"  - {f['fonte']}: {', '.join(f['tabelas'])}")
     for t in reais:
         oculta = " (oculta)" if t["oculta"] else ""
-        desc = f" ({t['descricao']})" if t.get("descricao") else ""
-        linhas.append(f"\n## {t['nome']}{oculta}{desc}: {len(t['colunas'])} colunas, {len(t['medidas'])} medidas")
+        linhas.append(f"\n## {t['nome']}{oculta}: {len(t['colunas'])} colunas, {len(t['medidas'])} medidas")
+        if t.get("descricao"):
+            linhas.append(f"Descrição: {t['descricao']}")
         if t["medidas"]:
             linhas.append("Medidas:")
             for ms in t["medidas"]:
@@ -824,6 +880,18 @@ def linhagem(alvo: dict) -> dict:
                                    "colunas": sorted(cols), "existe": campo in colunas or nome_medida in medidas})
             visuais.append({"pagina": p["exibicao"], "visual": v["nome"], "tipo": v["tipo"],
                             "titulo": v.get("titulo"), "campos": campos})
+    for f in rel.get("filtros", []):  # campo usado só em filtro também conta como usado
+        for c in f["campos"]:
+            nome_medida = c["campo"].split("[", 1)[1][:-1] if "[" in c["campo"] else c["campo"]
+            if c["tipo"] == "medida" and nome_medida in medidas:
+                meds, cols = fecha({nome_medida}, set())
+            elif c["campo"] in colunas:
+                meds, cols = fecha(set(), {c["campo"]})
+            else:
+                inexistentes.add(c["campo"])
+                meds, cols = set(), set()
+            usados_m |= meds
+            usadas_c |= cols
 
     tabelas_usadas = {colunas[c]["tabela"] for c in usadas_c if c in colunas} | {medidas[m]["tabela"] for m in usados_m}
     relacoes_usadas = [r for r in mod["relacoes"]
@@ -841,6 +909,8 @@ def linhagem(alvo: dict) -> dict:
                              if col["calculada"] and c not in usadas_c and not AUTOMATICAS.match(col["tabela"]))
     return {
         "visuais": visuais,
+        "filtros": rel.get("filtros", []),
+        "usadas_colunas": sorted(usadas_c),
         "medidas": {m: {"tabela": medidas[m]["tabela"], "expressao": medidas[m]["expressao"],
                         "formato": medidas[m].get("formato"), "usa_medidas": sorted(deps_medida[m][0]),
                         "usa_colunas": sorted(deps_medida[m][1])} for m in sorted(usados_m)},
@@ -886,6 +956,10 @@ def linhagem_texto(d: dict, arquivo: str) -> str:
                 rotulo_col = "colunas " if c["tipo"] == "medida" else "coluna calculada, usa "
                 caminho.append(rotulo_col + ", ".join(outras))
             linhas.append(f"    {rotulo}" + (f" → {'; '.join(caminho)}" if caminho else ""))
+    if d.get("filtros"):
+        linhas.append("\n## Filtros")
+        for f in d["filtros"]:
+            linhas.append(f"- {f['onde']}: " + ", ".join(c["campo"] for c in f["campos"]))
     if d["medidas"]:
         linhas.append("\n## Medidas usadas")
         for nome, ms in d["medidas"].items():
@@ -929,6 +1003,181 @@ def linhagem_texto(d: dict, arquivo: str) -> str:
     return "\n".join(linhas)
 
 
+# ---------------------------------------------------------------- revisão
+
+FONTES_COM_FOLDING = re.compile(r"\b(Sql\.Databases?|Oracle\.Database|PostgreSQL\.Database|MySQL\.Database|"
+                                r"Odbc\.(?:DataSource|Query)|OleDb\.DataSource|Teradata\.Database|Snowflake\.Databases|"
+                                r"GoogleBigQuery\.Database|AmazonRedshift\.Database|Databricks\.\w+|SapHana\.Database|"
+                                r"DB2\.Database)\s*\(")
+QUEBRA_FOLDING = {"Table.AddIndexColumn", "Table.Buffer", "List.Buffer", "Table.FillDown", "Table.FillUp",
+                  "Table.Transpose", "Table.AddRankColumn"}
+AGREGA_DAX = re.compile(r"\b(CALCULATE|CALCULATETABLE|SUMX?|AVERAGEX?|COUNTX?|COUNTA|COUNTROWS|DISTINCTCOUNT|"
+                        r"MINX?|MAXX?|RELATEDTABLE|FILTER|ALL|ALLEXCEPT|SUMMARIZE)\s*\(", re.I)
+SUFIXO_CHAVE = re.compile(r"(Key|SK|ID|Id|_id|Cod|Codigo|Código)$")
+TABELA_DATA = re.compile(r"(date|data|calend|tempo|time|dcal|dim_?tempo)", re.I)
+SEVERIDADES = ("alta", "média", "baixa")
+
+
+def revisar(alvo: dict) -> dict:
+    mod = modelo(alvo)
+    try:
+        lin = linhagem(alvo)
+    except Erro:
+        lin = None  # sem relatório: revisa só o modelo
+    achados = []
+
+    def achado(regra, severidade, objeto, detalhe, como_corrigir):
+        achados.append({"regra": regra, "severidade": severidade, "objeto": objeto,
+                        "detalhe": detalhe, "como_corrigir": como_corrigir})
+
+    if lin is not None and not lin["visuais"]:
+        lin = None  # relatório sem visuais: as regras de uso não fazem sentido
+        sem_visuais = True
+    else:
+        sem_visuais = False
+    reais = [t for t in mod["tabelas"] if not t["automatica"]]
+    usadas_c = set(lin["usadas_colunas"]) if lin else set()
+    medidas_usadas = set(lin["medidas"]) if lin else set()
+    sem_formato_disponivel = bool(mod.get("aviso"))
+
+    for t in reais:
+        for ms in t["medidas"]:
+            nome = f"{t['nome']}[{ms['nome']}]"
+            if not ms.get("formato") and not sem_formato_disponivel:
+                achado("medida sem formato", "baixa", nome,
+                       "O número aparece cru: sem separador de milhar, moeda ou casas decimais fixas.",
+                       "Definir o formato da medida (Ferramentas de medida → Formato, ou formatString pelo MCP).")
+            if "/" in limpa_dax(ms.get("expressao")):
+                achado("divisão com /", "média", nome,
+                       f"{' '.join((ms['expressao'] or '').split())}. Com divisor zero ou vazio, a conta dá erro ou infinito.",
+                       "Trocar a / por DIVIDE(numerador, denominador), que devolve vazio quando o divisor é zero.")
+        for c in t["colunas"]:
+            if c["calculada"] and AGREGA_DAX.search(limpa_dax(c.get("expressao"))):
+                nome = f"{t['nome']}[{c['nome']}]"
+                usada = nome in usadas_c
+                achado("coluna calculada que agrega", "alta" if usada else "média", nome,
+                       f"{' '.join((c['expressao'] or '').split())}. É calculada uma vez, na atualização, e não "
+                       f"responde aos filtros do relatório" + (" (e está num visual)." if usada else "."),
+                       "Trocar por uma medida com a mesma fórmula, e usar a medida nos visuais.")
+        m_txt = t.get("m") or ""
+        if FONTES_COM_FOLDING.search(m_txt):
+            passos = origem_m(m_txt)["passos"]
+            quebra = next((i for i, p in enumerate(passos) if p["funcao"] in QUEBRA_FOLDING), None)
+            if quebra is not None:
+                depois = [p["passo"] for p in passos[quebra + 1:]]
+                navegacao = (re.search(r"\bSql\.Databases?\s*\(", m_txt)
+                             and "CreateNavigationProperties=false" not in m_txt.replace(" ", ""))
+                detalhe = (f"O passo \"{passos[quebra]['passo']}\" ({passos[quebra]['funcao']}) impede que o resto da "
+                           "consulta vá para o banco" + (f": {', '.join(depois)} rodam no Power Query." if depois else "."))
+                if navegacao:
+                    achado("colunas de relação numa consulta sem folding", "alta", t["nome"],
+                           detalhe + " E o Sql.Database cria colunas de relação: cada chave vira uma consulta ao banco, "
+                           "o que pode levar a milhares de consultas na atualização.",
+                           "Pôr [CreateNavigationProperties=false] no Sql.Database e levar o passo que quebra o "
+                           "folding para o fim, ou fazê-lo no banco (view ou consulta).")
+                else:
+                    achado("passo de M que quebra o folding", "média", t["nome"], detalhe,
+                           "Levar esse passo para o fim da consulta, ou fazê-lo no banco (view ou consulta).")
+    autos = [t for t in mod["tabelas"] if t["automatica"]]
+    if autos:
+        achado("auto data/hora ligada", "baixa", "modelo",
+               f"{len(autos)} tabelas automáticas de data, uma para cada coluna de data, ocultas e ocupando espaço.",
+               "Desligar em Arquivo → Opções → Dados atuais → Carga de Dados → Data/hora automática, e usar uma "
+               "tabela de datas própria, marcada como tabela de datas.")
+    for t in reais:
+        tem_data = any(c.get("tipo_dado") == "data/hora" for c in t["colunas"])
+        if TABELA_DATA.search(t["nome"]) and tem_data and (t.get("categoria") or "").lower() != "time":
+            achado("tabela de datas não marcada", "baixa", t["nome"],
+                   "Parece a tabela de datas do modelo, mas não está marcada como tabela de datas.",
+                   "Ferramentas de tabela → Marcar como tabela de datas, escolhendo a coluna de data.")
+    for r in mod["relacoes"]:
+        if AUTOMATICAS.match(r["para"].split("[")[0]):
+            continue
+        if r["direcao"] == "ambas":
+            achado("relação bidirecional", "média", f"{r['de']} → {r['para']}",
+                   "O filtro anda nos dois sentidos. Pode mudar números sem ninguém perceber e criar caminhos ambíguos.",
+                   "Voltar para direção única e, se uma medida precisar do outro sentido, usar CROSSFILTER nela.")
+        if not r["ativa"]:
+            colunas_rel = {r["de"], r["para"]}
+            usa = any("USERELATIONSHIP" in limpa_dax(ms.get("expressao")).upper()
+                      and any(c.split("[")[1][:-1] in (ms.get("expressao") or "") for c in colunas_rel)
+                      for t in reais for ms in t["medidas"])
+            if not usa:
+                achado("relação inativa sem uso", "baixa", f"{r['de']} → {r['para']}",
+                       "Nenhuma medida ativa essa relação com USERELATIONSHIP.",
+                       "Se a análise por essa data for necessária, criar medidas com USERELATIONSHIP; senão, apagar.")
+    ligadas = {(r["de"], r["para"]) for r in mod["relacoes"]} | {(r["para"], r["de"]) for r in mod["relacoes"]}
+    for a in reais:
+        for c in a["colunas"]:
+            if not SUFIXO_CHAVE.search(c["nome"]):
+                continue
+            base = SUFIXO_CHAVE.sub("", c["nome"]).lower()
+            for b in reais:
+                if b is a or len(base) < 3 or base not in b["nome"].lower():
+                    continue
+                if any(cb["nome"] == c["nome"] for cb in b["colunas"]):
+                    par = (f"{a['nome']}[{c['nome']}]", f"{b['nome']}[{c['nome']}]")
+                    if par not in ligadas:
+                        achado("possível relação faltando", "média", f"{par[0]} ↔ {par[1]}",
+                               "As duas tabelas têm a mesma chave, mas não há relação entre elas.",
+                               "Conferir se a relação deveria existir e criá-la (muitos para um, direção única).")
+    if lin:
+        for campo in lin["inexistentes"]:
+            achado("visual quebrado", "alta", campo,
+                   "Um visual ou filtro usa um campo que não existe no modelo.",
+                   "Trocar o campo no visual ou recriar a medida ou coluna que sumiu.")
+        for m in lin["nao_usados"]["medidas"]:
+            achado("medida sem uso", "baixa", m,
+                   "Nenhum visual, filtro ou medida usada depende dela.",
+                   "Conferir se é usada fora do relatório (outros relatórios, Excel); se não, apagar.")
+        for c in lin["nao_usados"]["colunas_calculadas"]:
+            achado("coluna calculada sem uso", "baixa", c, "Nenhum visual, filtro ou medida usada depende dela.",
+                   "Conferir se é usada fora do relatório; se não, apagar.")
+        if mod.get("estatisticas"):
+            em_relacao = {r["de"] for r in mod["relacoes"]} | {r["para"] for r in mod["relacoes"]}
+            # Coluna citada por qualquer medida ou coluna calculada (mesmo sem uso) não entra como "pesada sem uso".
+            indice = {ms["nome"]: {**ms, "tabela": t["nome"]} for t in reais for ms in t["medidas"]}
+            citadas = set()
+            for t in reais:
+                for item in t["medidas"] + [c for c in t["colunas"] if c["calculada"]]:
+                    citadas |= refs_dax(item.get("expressao"), t["nome"], indice)[1]
+            pesadas = [e for e in mod["estatisticas"]
+                       if not AUTOMATICAS.match(e["coluna"]) and e["kb"] >= 100
+                       and e["coluna"] not in usadas_c and e["coluna"] not in em_relacao and e["coluna"] not in citadas]
+            if pesadas:
+                total = sum(e["kb"] for e in pesadas)
+                lista = "; ".join(f"{e['coluna']} ({numero(e['kb'], 1)} KB)" for e in pesadas[:10])
+                achado("colunas pesadas sem uso", "média", f"{len(pesadas)} colunas, {numero(total / 1024, 1)} MB",
+                       f"Nenhum visual, filtro, medida ou relação usa estas colunas: {lista}"
+                       + ("; e outras." if len(pesadas) > 10 else "."),
+                       "Remover as colunas no Power Query (Escolher colunas), depois de conferir que nenhum outro "
+                       "relatório, ordenação ou regra de segurança (RLS) depende delas.")
+    achados.sort(key=lambda a: SEVERIDADES.index(a["severidade"]))
+    resumo = {s: sum(a["severidade"] == s for a in achados) for s in SEVERIDADES}
+    return {"resumo": resumo, "achados": achados, "revisou_relatorio": lin is not None,
+            "relatorio_sem_visuais": sem_visuais, "formato_das_medidas": not sem_formato_disponivel}
+
+
+def revisar_texto(d: dict, arquivo: str) -> str:
+    r = d["resumo"]
+    linhas = [f"Revisão: {arquivo}",
+              f"{plural(len(d['achados']), 'achado')}: {r['alta']} de severidade alta, {r['média']} média, "
+              f"{r['baixa']} baixa"]
+    if d.get("relatorio_sem_visuais"):
+        linhas.append("Aviso: o relatório não tem visuais; as regras de uso (sem uso, colunas pesadas) foram puladas.")
+    elif not d["revisou_relatorio"]:
+        linhas.append("Aviso: não achei o relatório; só o modelo foi revisado.")
+    if not d["formato_das_medidas"]:
+        linhas.append("Aviso: o formato das medidas não pôde ser lido; a regra de medida sem formato foi pulada.")
+    sev = None
+    for a in d["achados"]:
+        if a["severidade"] != sev:
+            sev = a["severidade"]
+            linhas.append(f"\n## Severidade {sev}")
+        linhas.append(f"- [{a['regra']}] {a['objeto']}\n    {a['detalhe']}\n    Como corrigir: {a['como_corrigir']}")
+    return "\n".join(linhas)
+
+
 # ---------------------------------------------------------------- linha de comando
 
 PBIXRAY_VERSAO = "0.15.5"  # a mesma do cabeçalho do script; o formato das medidas depende dela
@@ -961,7 +1210,8 @@ def principal(argv: list[str]) -> int:
     for nome, ajuda in (("info", "tipo do arquivo e de qual Desktop veio"),
                         ("relatorio", "páginas, visuais e campos"),
                         ("modelo", "tabelas, medidas, relações, M e fontes"),
-                        ("linhagem", "de cada visual até a fonte, e o que não é usado")):
+                        ("linhagem", "de cada visual até a fonte, e o que não é usado"),
+                        ("revisar", "regras de boas práticas no modelo, no DAX, nas relações e no M")):
         sp = sub.add_parser(nome, help=ajuda)
         sp.add_argument("arquivo")
         sp.add_argument("--json", action="store_true", help="saída em JSON")
@@ -982,10 +1232,14 @@ def principal(argv: list[str]) -> int:
             d = modelo(alvo)
             print(json.dumps(d, ensure_ascii=False, indent=2, default=str) if a.json
                   else modelo_texto(d, a.arquivo, a.tudo))
-        else:
+        elif a.comando == "linhagem":
             d = linhagem(alvo)
             print(json.dumps(d, ensure_ascii=False, indent=2, default=str) if a.json
                   else linhagem_texto(d, a.arquivo))
+        else:
+            d = revisar(alvo)
+            print(json.dumps(d, ensure_ascii=False, indent=2, default=str) if a.json
+                  else revisar_texto(d, a.arquivo))
     except Erro as e:
         print(f"Erro: {e}", file=sys.stderr)
         return 1
