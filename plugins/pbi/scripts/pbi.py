@@ -5,28 +5,45 @@
 # ///
 """pbi.py: lê arquivos do Power BI (PBIX, PBIT e PBIP) para o plugin pbi.
 
-Subcomandos:
-  ambiente              confere o Python e o PBIXRay (usado pela skill configurar)
-  info <arquivo>        que tipo de arquivo é e de qual Desktop veio
-  relatorio <arquivo>   páginas, visuais e os campos de cada visual
-  modelo <arquivo>      tabelas, medidas, colunas calculadas, relações, M e fontes
-  linhagem <arquivo>    de cada visual até a fonte: medidas, colunas, tabelas, M; e o que não é usado
-  revisar <arquivo>     regras de boas práticas (achados por severidade, com o que corrigir)
+Leitura (nunca grava):
+  ambiente                      confere o Python e o PBIXRay (usado pela skill configurar)
+  info <arquivo>                que tipo de arquivo é e de qual Desktop veio
+  relatorio <arquivo>           páginas, visuais, campos e filtros
+  modelo <arquivo>              tabelas, medidas, colunas calculadas, relações, M e fontes
+  linhagem <arquivo>            de cada visual até a fonte, e o que não é usado
+  revisar <arquivo>             regras de boas práticas, por severidade
+  comparar <arquivo> [outro]    o que mudou: entre dois arquivos, ou do arquivo para uma versão do Git (--rev)
 
-Opções de relatorio e modelo: --json (saída em JSON) e --tudo (inclui as tabelas
-automáticas de data/hora).
+Fluxo guiado de visuais (PBIX e PBIT do Report Server):
+  checar <arquivo>              confere se dá para editar (Report Server, Desktop fechado, Git)
+  extrair <arquivo>             cria a pasta de trabalho no %TEMP% com o layout.json editável
+  montar <pasta>                valida o layout.json e gera a cópia editada na pasta de trabalho
+  abrir <pasta>                 abre a cópia no Desktop, para conferir e salvar (ou exportar, no PBIT)
+  trocar <pasta> --confirmo     põe a cópia salva pelo Desktop no lugar do original (o original some)
+  limpar [<pasta>] [--tudo]     apaga a pasta de trabalho (ou as sobras com mais de um dia)
 
-Este script só lê. Nunca grava em .pbix ou .pbit.
+Só o trocar grava no arquivo da pessoa, e só depois de conferir o carimbo do Desktop
+(o SecurityBindings), a origem (Report Server) e que o original não mudou.
 O modelo de um PBIX é lido pelo PBIXRay; o resto usa só a biblioteca padrão.
 """
 from __future__ import annotations
 
 import argparse
+import copy
+import csv
+import difflib
+import hashlib
+import io
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 AGREGACOES = {0: "Soma", 1: "Média", 2: "Contagem distinta", 3: "Mín", 4: "Máx",
@@ -1178,6 +1195,500 @@ def revisar_texto(d: dict, arquivo: str) -> str:
     return "\n".join(linhas)
 
 
+# ---------------------------------------------------------------- comparar
+
+def normaliza(expr: str | None) -> str:
+    return " ".join((expr or "").split())
+
+
+def foto(caminho: str, com_modelo: bool = True) -> dict:
+    """Retrato comparável de um arquivo: o modelo e o relatório, normalizados."""
+    alvo = abrir(caminho)
+    f = {"medidas": {}, "calculadas": {}, "colunas": {}, "relacoes": {}, "consultas": {}, "tabelas": [],
+         "paginas": {}, "visuais": {}, "filtros": [], "avisos": []}
+    if com_modelo:
+        try:
+            mod = modelo(alvo)
+        except Erro as e:
+            mod = None
+            f["avisos"].append(f"modelo não lido: {e}")
+        if mod:
+            for t in mod["tabelas"]:
+                if t["automatica"]:
+                    continue
+                f["tabelas"].append(t["nome"])
+                for ms in t["medidas"]:
+                    f["medidas"][f"{t['nome']}[{ms['nome']}]"] = {
+                        "expressao": normaliza(ms["expressao"]), "formato": ms.get("formato"),
+                        "pasta": ms.get("pasta"), "descricao": ms.get("descricao")}
+                for c in t["colunas"]:
+                    chave = f"{t['nome']}[{c['nome']}]"
+                    if c["calculada"]:
+                        f["calculadas"][chave] = {"expressao": normaliza(c["expressao"]), "formato": c.get("formato")}
+                    else:
+                        f["colunas"][chave] = {"tipo": c.get("tipo_dado")}
+                if t.get("m"):
+                    f["consultas"][t["nome"]] = t["m"].replace("\r\n", "\n").strip()
+                elif t.get("dax"):
+                    f["consultas"][t["nome"]] = "(tabela calculada) " + normaliza(t["dax"])
+            for r in mod["relacoes"]:
+                if AUTOMATICAS.match(r["para"].split("[")[0]):
+                    continue
+                f["relacoes"][f"{r['de']} → {r['para']}"] = {
+                    "ativa": r["ativa"], "direcao": r["direcao"], "cardinalidade": r["cardinalidade"]}
+    try:
+        rel = relatorio(alvo)
+    except Erro as e:
+        rel = None
+        f["avisos"].append(f"relatório não lido: {e}")
+    if rel:
+        for p in rel["paginas"]:
+            f["paginas"][p["nome"]] = {"nome": p["exibicao"], "oculta": bool(p.get("oculta"))}
+            for v in p["visuais"]:
+                campos = {papel: [c["campo"] + (f" ({c['agregacao']})" if c.get("agregacao") else "") for c in lista]
+                          for papel, lista in v.get("campos", {}).items()}
+                f["visuais"][v["nome"]] = {"pagina": p["exibicao"], "tipo": v["tipo"], "titulo": v.get("titulo"),
+                                           "campos": campos,
+                                           "posicao": [round(v.get(k) or 0) for k in ("x", "y", "largura", "altura")]}
+        for fil in rel.get("filtros", []):
+            for c in fil["campos"]:
+                f["filtros"].append(f"{fil['onde']}: {c['campo']}")
+    return f
+
+
+def compara_dicts(antes: dict, depois: dict) -> dict:
+    return {"novos": [{"objeto": k, "valor": depois[k]} for k in sorted(depois) if k not in antes],
+            "removidos": [{"objeto": k, "valor": antes[k]} for k in sorted(antes) if k not in depois],
+            "alterados": [{"objeto": k, "antes": antes[k], "depois": depois[k]}
+                          for k in sorted(antes) if k in depois and antes[k] != depois[k]]}
+
+
+def comparar_fotos(a: dict, b: dict) -> dict:
+    d = {chave: compara_dicts(a[chave], b[chave])
+         for chave in ("medidas", "calculadas", "colunas", "relacoes", "consultas", "paginas", "visuais")}
+    d["filtros"] = {"novos": [{"objeto": x, "valor": None} for x in sorted(set(b["filtros"]) - set(a["filtros"]))],
+                    "removidos": [{"objeto": x, "valor": None} for x in sorted(set(a["filtros"]) - set(b["filtros"]))],
+                    "alterados": []}
+    for c in d["consultas"]["alterados"]:  # o M sai como diff de linhas
+        c["diff"] = list(difflib.unified_diff(c["antes"].split("\n"), c["depois"].split("\n"), "antes", "depois",
+                                              lineterm="", n=1))[2:]
+    d["avisos"] = a["avisos"] + b["avisos"]
+    d["igual"] = not any(v["novos"] or v["removidos"] or v["alterados"] for k, v in d.items() if isinstance(v, dict))
+    return d
+
+
+def versao_git(caminho: Path, rev: str, destino: Path) -> Path:
+    """Escreve no `destino` (pasta temporária) a versão do arquivo (ou da pasta do PBIP) na revisão `rev`."""
+    pasta = caminho.parent if caminho.is_file() else caminho
+    r = subprocess.run(["git", "-C", str(pasta), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if r.returncode:
+        raise Erro("O arquivo não está num repositório Git. Para comparar, passe dois arquivos.")
+    raiz = Path(r.stdout.strip())
+
+    def mostra(rel: str) -> bytes:
+        s = subprocess.run(["git", "-C", str(raiz), "show", f"{rev}:{rel}"], capture_output=True)
+        if s.returncode:
+            raise Erro(f"Não achei {rel} na versão {rev} do Git.")
+        return s.stdout
+
+    if caminho.is_file() and caminho.suffix.lower() in (".pbix", ".pbit"):
+        rel = caminho.resolve().relative_to(raiz.resolve()).as_posix()
+        saida = destino / caminho.name
+        saida.write_bytes(mostra(rel))
+        return saida
+    # PBIP: traz a pasta inteira onde está o .pbip (ou a pasta pedida)
+    base = (caminho.parent if caminho.is_file() else caminho).resolve().relative_to(raiz.resolve()).as_posix()
+    ls = subprocess.run(["git", "-C", str(raiz), "ls-tree", "-r", "--name-only", rev, "--", base or "."],
+                        capture_output=True, text=True, encoding="utf-8")
+    nomes = [n for n in ls.stdout.splitlines() if n]
+    if not nomes:
+        raise Erro(f"Não achei {base or 'a pasta'} na versão {rev} do Git.")
+    for n in nomes:
+        alvo = destino / n
+        alvo.parent.mkdir(parents=True, exist_ok=True)
+        alvo.write_bytes(mostra(n))
+    return destino / caminho.resolve().relative_to(raiz.resolve())
+
+
+def comparar(arquivo: str, outro: str | None, rev: str | None) -> dict:
+    temporaria = Path(tempfile.mkdtemp(prefix="pbi-x-comparar-"))
+    try:
+        if outro:
+            antes, depois = arquivo, outro
+            rotulo = (arquivo, outro)
+        else:
+            antes = str(versao_git(Path(arquivo), rev or "HEAD", temporaria))
+            depois = arquivo
+            rotulo = (f"{arquivo} (Git: {rev or 'HEAD'})", f"{arquivo} (atual)")
+        d = comparar_fotos(foto(antes), foto(depois))
+        d["antes"], d["depois"] = rotulo
+        return d
+    finally:
+        shutil.rmtree(temporaria, ignore_errors=True)
+
+
+def descreve_item(chave: str, objeto: str, valor) -> str:
+    """Uma linha legível para um item novo ou removido."""
+    if chave == "paginas":
+        return f"página \"{valor['nome']}\" [{objeto}]"
+    if chave == "visuais":
+        campos = "; ".join(f"{papel} = {', '.join(lista)}" for papel, lista in valor["campos"].items())
+        titulo = f" \"{valor['titulo']}\"" if valor.get("titulo") else ""
+        return f"{valor['tipo']}{titulo} na página \"{valor['pagina']}\": {campos or 'sem campos'} [{objeto}]"
+    if chave in ("medidas", "calculadas"):
+        fmt = f"   [formato: {valor['formato']}]" if valor.get("formato") else ""
+        return f"{objeto} = {valor['expressao']}{fmt}"
+    if chave == "relacoes":
+        return f"{objeto} ({valor['cardinalidade']}, {'ativa' if valor['ativa'] else 'inativa'}, {valor['direcao']})"
+    if chave == "colunas":
+        return f"{objeto} ({valor['tipo']})"
+    return objeto
+
+
+def comparar_texto(d: dict) -> str:
+    linhas = [f"Comparação\n  antes:  {d['antes']}\n  depois: {d['depois']}"]
+    for aviso in d.get("avisos", []):
+        linhas.append(f"Aviso: {aviso}")
+    if d["igual"]:
+        linhas.append("\nNenhuma diferença no modelo nem no relatório.")
+        return "\n".join(linhas)
+    titulos = [("medidas", "Medidas"), ("calculadas", "Colunas calculadas"), ("colunas", "Colunas"),
+               ("relacoes", "Relações"), ("consultas", "Consultas (M)"), ("paginas", "Páginas"),
+               ("visuais", "Visuais"), ("filtros", "Filtros")]
+    for chave, titulo in titulos:
+        c = d[chave]
+        if not (c["novos"] or c["removidos"] or c["alterados"]):
+            continue
+        linhas.append(f"\n## {titulo}: {len(c['novos'])} novos, {len(c['alterados'])} alterados, "
+                      f"{len(c['removidos'])} removidos")
+        for sinal, lista in (("+", c["novos"]), ("-", c["removidos"])):
+            for n in lista:
+                linhas.append(f"{sinal} {descreve_item(chave, n['objeto'], n['valor'])}")
+        for alt in c["alterados"]:
+            antes, depois = alt["antes"], alt["depois"]
+            if chave == "visuais":
+                linhas.append(f"~ {depois['tipo']} na página \"{depois['pagina']}\" [{alt['objeto']}]")
+                for papel in sorted(set(antes["campos"]) | set(depois["campos"])):
+                    a, b = antes["campos"].get(papel, []), depois["campos"].get(papel, [])
+                    saiu, entrou = [x for x in a if x not in b], [x for x in b if x not in a]
+                    if saiu or entrou:
+                        linhas.append(f"    {papel}: " + "; ".join([f"sai {x}" for x in saiu] + [f"entra {x}" for x in entrou]))
+                    elif a != b:
+                        linhas.append(f"    {papel}: mudou a ordem dos campos")
+                if antes["tipo"] != depois["tipo"]:
+                    linhas.append(f"    tipo: {antes['tipo']} → {depois['tipo']}")
+                if antes.get("titulo") != depois.get("titulo"):
+                    linhas.append(f"    título: {antes.get('titulo')!r} → {depois.get('titulo')!r}")
+                if antes["posicao"] != depois["posicao"]:
+                    linhas.append("    posição (x, y, largura, altura): {} → {}".format(antes["posicao"], depois["posicao"]))
+                if antes["pagina"] != depois["pagina"]:
+                    linhas.append(f"    página: {antes['pagina']} → {depois['pagina']}")
+                continue
+            linhas.append(f"~ {alt['objeto']}")
+            if chave == "consultas":
+                linhas += [f"    {l}" for l in alt["diff"]]
+                continue
+            for campo in depois:
+                if antes.get(campo) != depois.get(campo):
+                    linhas.append(f"    {campo}: {antes.get(campo)!r} → {depois.get(campo)!r}")
+    return "\n".join(linhas)
+
+
+# ---------------------------------------------------------------- fluxo guiado de visuais
+
+PASTA_FLUXO = Path(tempfile.gettempdir()) / "pbi-x"
+CHAVES_TEXTO = ("config", "filters", "query", "dataTransforms")  # no Layout, estes valores são JSON em texto
+
+
+def sha256(caminho: Path) -> str:
+    h = hashlib.sha256()
+    with open(caminho, "rb") as arq:
+        for bloco in iter(lambda: arq.read(1 << 20), b""):
+            h.update(bloco)
+    return h.hexdigest()
+
+
+def titulos_desktop() -> list[str]:
+    """Títulos das janelas do Power BI Desktop abertas (os dois Desktops usam PBIDesktop.exe)."""
+    if os.name != "nt":
+        return []
+    try:
+        r = subprocess.run(["tasklist", "/v", "/fo", "csv", "/nh", "/fi", "imagename eq PBIDesktop.exe"],
+                           capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    saida = r.stdout.decode("oem", errors="replace")
+    return [linha[-1] for linha in csv.reader(io.StringIO(saida)) if len(linha) > 2 and linha[0].lower() == "pbidesktop.exe"]
+
+
+def aberto_no_desktop(arquivo: Path) -> str | None:
+    """O Desktop do RS mostra "<nome> - Power BI Desktop (<mês> de <ano>)"; o normal, só "<nome>"."""
+    nome = arquivo.stem.lower()
+    for t in titulos_desktop():
+        limpo = t.strip().rstrip("*").strip().lower()
+        if limpo == nome or limpo.startswith(f"{nome} - "):
+            return t
+    return None
+
+
+def checar(caminho: str) -> dict:
+    alvo = abrir(caminho)
+    arquivo = alvo["caminho"].resolve()
+    d = info(alvo)
+    problemas, avisos = [], []
+    if alvo["tipo"] not in ("pbix", "pbit"):
+        problemas.append("O fluxo de visuais é para PBIX e PBIT do Report Server. Num PBIP, o relatório é texto "
+                         "e a edição de PBIP está fora da primeira versão do plugin.")
+    elif d["origem"] != "Desktop do Report Server" or "Report/Layout" not in alvo["zip"].namelist():
+        problemas.append("Este arquivo é do Desktop normal (relatório em PBIR dentro do zip). Na primeira versão, "
+                         "o fluxo de visuais é só para arquivos do Desktop do Report Server.")
+    janela = aberto_no_desktop(arquivo)
+    if janela:
+        problemas.append(f"O Desktop está com o arquivo aberto (\"{janela}\"). Salve e feche antes de começar.")
+    if not d["git"]["situacao"].startswith("versionado"):
+        avisos.append(f"Git: {d['git']['situacao']}. Na troca, o original é substituído de vez e não há backup: "
+                      "sem histórico no Git, não dá para voltar à versão anterior.")
+    elif "não commitadas" in d["git"]["situacao"]:
+        avisos.append("O arquivo tem mudanças não commitadas. Faça o commit antes, para poder voltar a esta versão.")
+    return {"arquivo": str(arquivo), "tipo": alvo["tipo"], "ok": not problemas, "problemas": problemas,
+            "avisos": avisos, "git": d["git"]}
+
+
+def abre_textos(layout: dict) -> dict:
+    """Abre em objetos os textos JSON do Layout (no relatório, no nível da página e no do visual)."""
+    def abre(no: dict):
+        for chave in CHAVES_TEXTO:
+            if isinstance(no.get(chave), str) and no[chave][:1] in "[{":
+                no[chave] = json.loads(no[chave])
+    abre(layout)
+    for s in layout.get("sections", []):
+        abre(s)
+        for vc in s.get("visualContainers", []):
+            abre(vc)
+    return layout
+
+
+def fecha_textos(layout: dict) -> dict:
+    """Volta os objetos a texto JSON compacto, como o Desktop grava."""
+    def fecha(no: dict):
+        for chave in CHAVES_TEXTO:
+            if isinstance(no.get(chave), (dict, list)):
+                no[chave] = json.dumps(no[chave], ensure_ascii=False, separators=(",", ":"))
+    fecha(layout)
+    for s in layout.get("sections", []):
+        fecha(s)
+        for vc in s.get("visualContainers", []):
+            fecha(vc)
+    return layout
+
+
+def limpar_sobras(dias: float = 1.0, tudo: bool = False) -> list[str]:
+    apagadas = []
+    if PASTA_FLUXO.is_dir():
+        limite = time.time() - dias * 86400
+        for p in PASTA_FLUXO.iterdir():
+            if p.is_dir() and (tudo or p.stat().st_mtime < limite):
+                shutil.rmtree(p, ignore_errors=True)
+                apagadas.append(str(p))
+    return apagadas
+
+
+def pasta_de_trabalho(pasta: str) -> tuple[Path, dict]:
+    p = Path(pasta).resolve()
+    try:
+        p.relative_to(PASTA_FLUXO.resolve())
+    except ValueError:
+        raise Erro(f"Isto não é uma pasta de trabalho do plugin (elas ficam em {PASTA_FLUXO}).")
+    if not (p / "estado.json").is_file():
+        raise Erro(f"Não achei o estado.json em {p}. Rode extrair de novo.")
+    return p, json.loads((p / "estado.json").read_text(encoding="utf-8"))
+
+
+def extrair(caminho: str) -> dict:
+    c = checar(caminho)
+    if not c["ok"]:
+        raise Erro(" ".join(c["problemas"]))
+    limpar_sobras()
+    original = Path(c["arquivo"])
+    pasta = PASTA_FLUXO / f"{original.stem}-{datetime.now():%Y%m%d-%H%M%S}"
+    pasta.mkdir(parents=True)
+    with zipfile.ZipFile(original) as z:
+        layout = abre_textos(json.loads(texto(z.read("Report/Layout"))))
+    (pasta / "layout.json").write_text(json.dumps(layout, ensure_ascii=False, indent=2), encoding="utf-8")
+    estado = {"original": str(original), "sha256": sha256(original), "tipo": c["tipo"],
+              "extraido": datetime.now().isoformat(timespec="seconds"), "candidato": None}
+    (pasta / "estado.json").write_text(json.dumps(estado, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"pasta": str(pasta), "layout": str(pasta / "layout.json"), "avisos": c["avisos"], "git": c["git"]}
+
+
+def campos_do_modelo(original: Path) -> set | None:
+    try:
+        mod = modelo(abrir(str(original)))
+    except Erro:
+        return None
+    nomes = set()
+    for t in mod["tabelas"]:
+        nomes |= {f"{t['nome']}[{c['nome']}]" for c in t["colunas"]}
+        nomes |= {f"{t['nome']}[{m['nome']}]" for m in t["medidas"]}
+    return nomes
+
+
+def validar_layout(layout: dict, existentes: set | None) -> tuple[list[str], list[str]]:
+    erros, ajustes = [], []
+    secoes = layout.get("sections")
+    if not isinstance(secoes, list) or not secoes:
+        return ["O layout precisa de pelo menos uma página em \"sections\"."], ajustes
+    nomes_pag, nomes_vis = set(), set()
+    for s in secoes:
+        pag = s.get("displayName", "?")
+        for chave in ("name", "displayName", "visualContainers"):
+            if chave not in s:
+                erros.append(f"Página \"{pag}\": falta \"{chave}\".")
+        if s.get("name") in nomes_pag:
+            erros.append(f"Página \"{pag}\": o name {s.get('name')} se repete.")
+        nomes_pag.add(s.get("name"))
+        for vc in s.get("visualContainers", []):
+            cfg = vc.get("config")
+            if not isinstance(cfg, dict):
+                erros.append(f"Página \"{pag}\": um visual está sem config.")
+                continue
+            nome = cfg.get("name")
+            if not nome or nome in nomes_vis:
+                erros.append(f"Página \"{pag}\": visual sem name ou com name repetido ({nome}).")
+            nomes_vis.add(nome)
+            for k in ("x", "y", "width", "height"):
+                if not isinstance(vc.get(k), (int, float)):
+                    erros.append(f"Visual {nome}: \"{k}\" precisa ser número.")
+            # a posição do container e a de layouts[0] precisam bater: o container manda
+            pos = {k: vc.get(k) for k in ("x", "y", "z", "width", "height") if k in vc}
+            lay = cfg.setdefault("layouts", [{"id": 0, "position": {}}])
+            if lay and any(lay[0].setdefault("position", {}).get(k) != v for k, v in pos.items()):
+                lay[0]["position"].update(pos)
+                ajustes.append(f"Visual {nome}: alinhei a posição de layouts[0] com a do container.")
+            for cache in ("query", "dataTransforms"):  # cache de consulta: o Desktop refaz ao abrir
+                if cache in vc:
+                    del vc[cache]
+            sv = cfg.get("singleVisual")
+            if sv is None:
+                if "singleVisualGroup" not in cfg:
+                    erros.append(f"Visual {nome}: falta singleVisual (ou singleVisualGroup, para grupo).")
+                continue
+            if not sv.get("visualType"):
+                erros.append(f"Visual {nome}: falta visualType.")
+            pq = sv.get("prototypeQuery", {})
+            apelidos = {f.get("Name"): f.get("Entity") for f in pq.get("From", [])}
+            selecionados = set()
+            for item in pq.get("Select", []):
+                selecionados.add(item.get("Name"))
+                for no in (item.get("Column"), item.get("Measure"),
+                           (item.get("Aggregation") or {}).get("Expression", {}).get("Column")):
+                    if isinstance(no, dict):
+                        fonte = no.get("Expression", {}).get("SourceRef", {}).get("Source")
+                        if fonte not in apelidos:
+                            erros.append(f"Visual {nome}: o apelido \"{fonte}\" não está no From.")
+                campo = descrever_campo(item, apelidos)
+                if existentes is not None and campo["tipo"] != "outro" and campo["campo"] not in existentes \
+                        and "nivel" not in campo:
+                    erros.append(f"Visual {nome}: o campo {campo['campo']} não existe no modelo.")
+            for papel, projs in sv.get("projections", {}).items():
+                for pr in projs:
+                    if pr.get("queryRef") not in selecionados:
+                        erros.append(f"Visual {nome}: o queryRef \"{pr.get('queryRef')}\" do papel {papel} não está "
+                                     "no Select do prototypeQuery.")
+    return erros, ajustes
+
+
+def grava_copia(original: Path, destino: Path, layout_bytes: bytes) -> None:
+    """Copia o zip entrada por entrada, troca o Layout e tira o SecurityBindings."""
+    override = '<Override PartName="/SecurityBindings" ContentType="" />'
+    with zipfile.ZipFile(original) as zin, zipfile.ZipFile(destino, "w") as zout:
+        for info_zip in zin.infolist():
+            if info_zip.filename == "SecurityBindings":
+                continue
+            dados = layout_bytes if info_zip.filename == "Report/Layout" else zin.read(info_zip.filename)
+            if info_zip.filename == "[Content_Types].xml":
+                dados = dados.decode("utf-8").replace(override, "").encode("utf-8")
+            novo = zipfile.ZipInfo(info_zip.filename, date_time=info_zip.date_time)
+            novo.compress_type = info_zip.compress_type
+            novo.create_system = info_zip.create_system
+            novo.external_attr = info_zip.external_attr
+            zout.writestr(novo, dados)
+
+
+def montar(pasta_txt: str) -> dict:
+    pasta, estado = pasta_de_trabalho(pasta_txt)
+    original = Path(estado["original"])
+    if sha256(original) != estado["sha256"]:
+        raise Erro("O original mudou desde a extração. Rode limpar e extrair de novo.")
+    try:
+        layout = json.loads((pasta / "layout.json").read_text(encoding="utf-8"))
+    except ValueError as e:
+        raise Erro(f"O layout.json não é um JSON válido: {e}")
+    erros, ajustes = validar_layout(layout, campos_do_modelo(original))
+    if erros:
+        return {"ok": False, "erros": erros, "ajustes": ajustes}
+    (pasta / "layout.json").write_text(json.dumps(layout, ensure_ascii=False, indent=2), encoding="utf-8")
+    bruto = json.dumps(fecha_textos(copy.deepcopy(layout)), ensure_ascii=False, separators=(",", ":"))
+    candidato = pasta / f"{original.stem} (editado){original.suffix}"
+    if candidato.exists():
+        candidato.unlink()
+    grava_copia(original, candidato, bruto.encode("utf-16-le"))
+    estado.update(candidato=str(candidato), montado=datetime.now().isoformat(timespec="seconds"))
+    (pasta / "estado.json").write_text(json.dumps(estado, ensure_ascii=False, indent=2), encoding="utf-8")
+    diferencas = comparar_fotos(foto(str(original), com_modelo=False), foto(str(candidato), com_modelo=False))
+    diferencas["antes"], diferencas["depois"] = str(original), str(candidato)
+    return {"ok": True, "candidato": str(candidato), "ajustes": ajustes, "diferencas": diferencas}
+
+
+def abrir_candidato(pasta_txt: str) -> dict:
+    pasta, estado = pasta_de_trabalho(pasta_txt)
+    if not estado.get("candidato") or not Path(estado["candidato"]).is_file():
+        raise Erro("Ainda não há cópia montada. Rode montar antes.")
+    candidato = Path(estado["candidato"])
+    if os.name == "nt":
+        os.startfile(str(candidato))  # abre no Desktop padrão do .pbix/.pbit
+        aberto = True
+    else:
+        aberto = False
+    if estado["tipo"] == "pbit":
+        como_salvar = (f"Confira os visuais e use Arquivo → Exportar → Modelo do Power BI, salvando por cima de "
+                       f"\"{candidato}\". Depois feche o Desktop sem salvar o PBIX.")
+    else:
+        como_salvar = "Confira os visuais, salve com Ctrl+S e feche o Desktop."
+    return {"candidato": str(candidato), "aberto": aberto, "como_salvar": como_salvar,
+            "lembrete": "Se a máquina tiver os dois Desktops, a cópia precisa abrir no do Report Server."}
+
+
+def trocar(pasta_txt: str, confirmo: bool) -> dict:
+    if not confirmo:
+        raise Erro("A troca substitui o original de vez. Rode com --confirmo só depois do ok da pessoa.")
+    pasta, estado = pasta_de_trabalho(pasta_txt)
+    original, candidato = Path(estado["original"]), Path(estado.get("candidato") or "")
+    if not candidato.is_file():
+        raise Erro("Não há cópia montada nesta pasta de trabalho.")
+    janela = aberto_no_desktop(candidato) or aberto_no_desktop(original)
+    if janela:
+        raise Erro(f"Feche o Desktop antes da troca (está aberto: \"{janela}\").")
+    with zipfile.ZipFile(candidato) as z:
+        nomes = z.namelist()
+        meta = json.loads(texto(z.read("Metadata"))) if "Metadata" in nomes else {}
+    if "SecurityBindings" not in nomes:
+        passo = ("exporte o PBIT (Arquivo → Exportar → Modelo do Power BI) por cima da cópia"
+                 if estado["tipo"] == "pbit" else "salve com Ctrl+S")
+        raise Erro(f"A cópia ainda não foi salva pelo Desktop (falta o SecurityBindings). Abra a cópia, confira, "
+                   f"{passo} e feche o Desktop.")
+    if meta.get("CreatedFrom") != "OnPrem":
+        raise Erro("A cópia foi salva pelo Desktop normal e o Desktop do Report Server não abre mais esse arquivo. "
+                   "Rode montar de novo e abra a cópia pelo Desktop do Report Server.")
+    if sha256(original) != estado["sha256"]:
+        raise Erro("O original mudou desde a extração. Nada foi trocado; comece de novo (limpar e extrair).")
+    temporario = original.with_name(f".{original.stem}.pbi-x-troca{original.suffix}")
+    shutil.copy2(candidato, temporario)
+    os.replace(temporario, original)
+    shutil.rmtree(pasta, ignore_errors=True)
+    return {"original": str(original), "sha256": sha256(original), "git": situacao_git(original)}
+
+
 # ---------------------------------------------------------------- linha de comando
 
 PBIXRAY_VERSAO = "0.15.5"  # a mesma do cabeçalho do script; o formato das medidas depende dela
@@ -1208,19 +1719,80 @@ def principal(argv: list[str]) -> int:
     sub = p.add_subparsers(dest="comando", required=True)
     sub.add_parser("ambiente", help="confere o Python e o PBIXRay")
     for nome, ajuda in (("info", "tipo do arquivo e de qual Desktop veio"),
-                        ("relatorio", "páginas, visuais e campos"),
+                        ("relatorio", "páginas, visuais, campos e filtros"),
                         ("modelo", "tabelas, medidas, relações, M e fontes"),
                         ("linhagem", "de cada visual até a fonte, e o que não é usado"),
-                        ("revisar", "regras de boas práticas no modelo, no DAX, nas relações e no M")):
+                        ("revisar", "regras de boas práticas no modelo, no DAX, nas relações e no M"),
+                        ("checar", "confere se o arquivo pode entrar no fluxo de visuais"),
+                        ("extrair", "cria a pasta de trabalho com o layout.json editável")):
         sp = sub.add_parser(nome, help=ajuda)
         sp.add_argument("arquivo")
         sp.add_argument("--json", action="store_true", help="saída em JSON")
-        if nome != "info":
+        if nome in ("relatorio", "modelo"):
             sp.add_argument("--tudo", action="store_true", help="inclui as tabelas automáticas de data/hora")
+    sp = sub.add_parser("comparar", help="o que mudou entre duas versões")
+    sp.add_argument("arquivo", help="o arquivo (ou o de antes, se houver um segundo)")
+    sp.add_argument("outro", nargs="?", help="o arquivo de depois; sem ele, compara com o Git")
+    sp.add_argument("--rev", default=None, help="versão do Git para comparar (padrão: HEAD)")
+    sp.add_argument("--json", action="store_true")
+    for nome, ajuda in (("montar", "valida o layout.json e gera a cópia"),
+                        ("abrir", "abre a cópia no Desktop"),
+                        ("trocar", "põe a cópia salva no lugar do original")):
+        sp = sub.add_parser(nome, help=ajuda)
+        sp.add_argument("pasta")
+        sp.add_argument("--json", action="store_true")
+        if nome == "trocar":
+            sp.add_argument("--confirmo", action="store_true", help="a pessoa deu o ok para substituir o original")
+    sp = sub.add_parser("limpar", help="apaga a pasta de trabalho ou as sobras")
+    sp.add_argument("pasta", nargs="?")
+    sp.add_argument("--tudo", action="store_true", help="apaga todas as pastas de trabalho do plugin")
     a = p.parse_args(argv)
     if a.comando == "ambiente":
         return ambiente()
+
+    def mostra(d, texto_fn):
+        print(json.dumps(d, ensure_ascii=False, indent=2, default=str) if getattr(a, "json", False) else texto_fn(d))
+
     try:
+        if a.comando == "comparar":
+            mostra(comparar(a.arquivo, a.outro, a.rev), comparar_texto)
+            return 0
+        if a.comando == "checar":
+            d = checar(a.arquivo)
+            mostra(d, lambda d: ("Pode seguir." if d["ok"] else "Não dá para seguir:") + "".join(
+                f"\n- {x}" for x in d["problemas"] + d["avisos"]))
+            return 0 if d["ok"] else 1
+        if a.comando == "extrair":
+            mostra(extrair(a.arquivo), lambda d: f"Pasta de trabalho: {d['pasta']}\nEdite: {d['layout']}"
+                   + "".join(f"\nAviso: {x}" for x in d["avisos"]))
+            return 0
+        if a.comando == "montar":
+            d = montar(a.pasta)
+            if not d["ok"]:
+                mostra(d, lambda d: "O layout.json tem problemas; nada foi gerado:" + "".join(
+                    f"\n- {x}" for x in d["erros"]))
+                return 1
+            mostra(d, lambda d: f"Cópia gerada: {d['candidato']}" + "".join(f"\n({x})" for x in d["ajustes"])
+                   + "\n\nO que muda no relatório:\n" + comparar_texto(d["diferencas"]).split("\n", 3)[-1])
+            return 0
+        if a.comando == "abrir":
+            mostra(abrir_candidato(a.pasta), lambda d: (f"Abri no Desktop: {d['candidato']}" if d["aberto"] else
+                                                        f"Abra no Desktop: {d['candidato']}")
+                   + f"\n{d['como_salvar']}\n{d['lembrete']}")
+            return 0
+        if a.comando == "trocar":
+            mostra(trocar(a.pasta, a.confirmo), lambda d: f"Pronto: a cópia tomou o lugar de {d['original']}.\n"
+                   f"Git: {d['git']['situacao']}. Para ver o que mudou, use o subcomando comparar.")
+            return 0
+        if a.comando == "limpar":
+            if a.pasta:
+                pasta, _ = pasta_de_trabalho(a.pasta)
+                shutil.rmtree(pasta, ignore_errors=True)
+                print(f"Apaguei {pasta}.")
+            else:
+                apagadas = limpar_sobras(tudo=a.tudo)
+                print(f"Apaguei {len(apagadas)} pasta(s) de trabalho." if apagadas else "Nada para apagar.")
+            return 0
         alvo = abrir(a.arquivo)
         if a.comando == "info":
             d = info(alvo)

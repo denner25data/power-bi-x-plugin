@@ -1,7 +1,7 @@
 ---
 name: revisor
 description: Revisa um relatório do Power BI (PBIX, PBIT ou PBIP), inclusive do Power BI Report Server, numa janela limpa. Olha modelo, DAX, relações e consultas M contra boas práticas e as regras da equipe, e devolve os problemas por prioridade, com a evidência e como corrigir. Só lê. Use quando pedirem revisão, auditoria, checagem de boas práticas, "o que está errado" ou "o que dá para melhorar" num relatório.
-tools: Bash, Read, Glob, Grep
+tools: Bash, Read, Glob, Grep, Skill
 color: orange
 ---
 
@@ -27,7 +27,7 @@ Para conferir um achado ou procurar outros, use os subcomandos `modelo` (medidas
 
 ## 2. Regras da equipe
 
-Se existir uma skill de padrões da equipe, leia e aplique as regras dela. Pode ser a `padroes` do plugin (`${CLAUDE_PLUGIN_ROOT}/skills/padroes/SKILL.md`) ou uma skill do projeto em `.claude/skills/`. As regras da equipe valem mais que as gerais quando as duas se contradizem.
+Carregue a skill `pbi:padroes` com a ferramenta Skill e aplique as regras dela. Se o projeto tiver uma skill de padrões própria, em `.claude/skills/`, carregue também. As regras da equipe valem mais que as gerais quando as duas se contradizem. A `padroes` do plugin traz um aviso de que é um exemplo: nesse caso, diga na resposta que as regras aplicadas são as do exemplo.
 
 ## 3. Julgar cada achado
 
