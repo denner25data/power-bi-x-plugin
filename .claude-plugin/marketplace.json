@@ -1,0 +1,14 @@
+{
+  "name": "power-bi-x",
+  "description": "Plugin do Claude Code para Power BI: PBIX, PBIT e PBIP, inclusive do Power BI Report Server.",
+  "owner": {
+    "name": "denner25data",
+    "url": "https://github.com/denner25data"
+  },
+  "plugins": [
+    {
+      "name": "pbi",
+      "source": "./plugins/pbi"
+    }
+  ]
+}

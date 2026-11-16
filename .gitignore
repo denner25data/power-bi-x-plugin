@@ -1,0 +1,21 @@
+# Dependências e ambientes locais
+node_modules/
+.venv/
+__pycache__/
+
+# Segredos
+.env
+
+# Configuração pessoal do Claude Code
+.claude/settings.local.json
+
+# Power BI: arquivos de relatório e caches locais de projetos PBIP
+*.pbix
+*.pbit
+**/.pbi/localSettings.json
+**/.pbi/cache.abf
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+desktop.ini

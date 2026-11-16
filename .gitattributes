@@ -1,0 +1,7 @@
+# Texto em LF no repositório e na cópia de trabalho, em qualquer sistema
+* text=auto eol=lf
+
+# Scripts do Windows em CRLF
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
