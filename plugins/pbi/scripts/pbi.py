@@ -10,6 +10,7 @@ Subcomandos:
   info <arquivo>        que tipo de arquivo é e de qual Desktop veio
   relatorio <arquivo>   páginas, visuais e os campos de cada visual
   modelo <arquivo>      tabelas, medidas, colunas calculadas, relações, M e fontes
+  linhagem <arquivo>    de cada visual até a fonte: medidas, colunas, tabelas, M; e o que não é usado
 
 Opções de relatorio e modelo: --json (saída em JSON) e --tudo (inclui as tabelas
 automáticas de data/hora).
@@ -413,9 +414,12 @@ def modelo_pbix(caminho: Path) -> dict:
     except Exception as e:  # a parte interna mudou numa versão nova do PBIXRay
         aviso = f"Formato das medidas indisponível nesta versão do PBIXRay ({type(e).__name__})."
 
+    # O tmschema_tables deixa de fora as tabelas automáticas de data; m.tables traz todas.
+    meta_por_nome = {t["Name"]: t for _, t in tabelas_meta.iterrows()}
+    nomes = list(meta_por_nome) + [n for n in m.tables if n not in meta_por_nome]
     tabelas = []
-    for _, t in tabelas_meta.iterrows():
-        nome = t["Name"]
+    for nome in nomes:
+        t = meta_por_nome.get(nome, {"IsHidden": True, "Description": None})
         cols = colunas_meta[colunas_meta["TableName"] == nome]
         colunas = []
         for _, c in cols.iterrows():
@@ -464,7 +468,7 @@ def modelo_pbit(z: zipfile.ZipFile) -> dict:
     esquema = json.loads(texto(z.read("DataModelSchema")))["model"]
     tabelas = []
     for t in esquema.get("tables", []):
-        colunas = [{"nome": c["name"], "tipo_dado": c.get("dataType"),
+        colunas = [{"nome": c["name"], "tipo_dado": TIPOS_TMDL.get(c.get("dataType"), c.get("dataType")),
                     "calculada": c.get("type") == "calculated",
                     "expressao": juntar(c.get("expression")), "formato": c.get("formatString"),
                     "oculta": bool(c.get("isHidden")), "descricao": c.get("description")}
@@ -492,13 +496,166 @@ def modelo_pbit(z: zipfile.ZipFile) -> dict:
     return {"origem": "DataModelSchema", "tabelas": tabelas, "relacoes": relacoes, "estatisticas": []}
 
 
+TIPOS_TMDL = {"int64": "inteiro", "string": "texto", "double": "decimal", "dateTime": "data/hora",
+              "decimal": "decimal fixo", "boolean": "booleano", "binary": "binário"}
+CABECALHO_TMDL = re.compile(r"^(table|measure|column|partition|hierarchy|calculationItem|relationship)\s+"
+                            r"('(?:[^']|'')*'|[^\s=]+)\s*(?:=\s*(.*))?$")
+
+
+def nome_tmdl(bruto: str) -> str:
+    return bruto[1:-1].replace("''", "'") if bruto.startswith("'") else bruto
+
+
+def recuo(linha: str) -> int:
+    return len(linha) - len(linha.lstrip("\t"))
+
+
+def bloco_tmdl(linhas: list[str], i: int, inicio: str, nivel: int) -> tuple[str, int]:
+    """Lê uma expressão que começa em `inicio` e pode continuar nas linhas mais indentadas."""
+    if inicio.startswith("```"):
+        partes, i = [inicio[3:]], i + 1
+        while i < len(linhas) and "```" not in linhas[i]:
+            partes.append(linhas[i].strip("\t"))
+            i += 1
+        return "\n".join(p for p in partes if p.strip()), i + 1
+    partes = [inicio] if inicio.strip() else []
+    i += 1
+    corpo = []
+    while i < len(linhas) and (not linhas[i].strip() or recuo(linhas[i]) > nivel + 1):
+        corpo.append(linhas[i])
+        i += 1
+    while corpo and not corpo[-1].strip():  # a linha em branco antes da próxima propriedade
+        corpo.pop()
+    if corpo:
+        base = min(recuo(l) for l in corpo if l.strip())
+        partes += [l[base:] if l.strip() else "" for l in corpo]
+    return "\n".join(partes).strip("\n"), i
+
+
+def tabela_tmdl(texto_tmdl: str) -> dict | None:
+    linhas = texto_tmdl.replace("\r\n", "\n").split("\n")
+    tabela, objeto, descricao, i = None, None, [], 0
+    while i < len(linhas):
+        linha = linhas[i]
+        nivel, conteudo = recuo(linha), linha.strip()
+        if conteudo.startswith("///"):
+            descricao.append(conteudo[3:].strip())
+            i += 1
+            continue
+        cab = CABECALHO_TMDL.match(conteudo)
+        if cab and nivel <= 1:
+            tipo, nome, resto = cab.group(1), nome_tmdl(cab.group(2)), cab.group(3)
+            desc = " ".join(descricao) or None
+            descricao = []
+            if tipo == "table" and nivel == 0:
+                tabela = {"nome": nome, "automatica": bool(AUTOMATICAS.match(nome)), "oculta": False,
+                          "descricao": desc, "colunas": [], "medidas": [], "m": None, "dax": None}
+                objeto, i = tabela, i + 1
+                continue
+            if tabela is None:
+                i += 1
+                continue
+            expr = None
+            if resto is not None and tipo in ("measure", "column"):
+                expr, i = bloco_tmdl(linhas, i, resto, nivel)
+            else:
+                i += 1
+            if tipo == "measure":
+                objeto = {"nome": nome, "expressao": expr, "formato": None, "pasta": None, "descricao": desc}
+                tabela["medidas"].append(objeto)
+            elif tipo == "column":
+                objeto = {"nome": nome, "tipo_dado": None, "calculada": expr is not None, "expressao": expr,
+                          "formato": None, "oculta": False, "descricao": desc}
+                tabela["colunas"].append(objeto)
+            elif tipo == "partition":
+                objeto = {"_particao": (resto or "").strip()}
+            else:
+                objeto = {}
+            continue
+        if objeto is not None and conteudo:
+            if conteudo.startswith("source =") or conteudo == "source=":
+                inicio = conteudo.split("=", 1)[1].strip()
+                expr, i = bloco_tmdl(linhas, i, inicio, nivel)
+                if objeto.get("_particao") == "m":
+                    tabela["m"] = expr
+                elif objeto.get("_particao") == "calculated":
+                    tabela["dax"] = expr
+                continue
+            chave, _, valor = conteudo.partition(":")
+            valor = valor.strip()
+            if objeto is tabela and conteudo == "isHidden":
+                tabela["oculta"] = True
+            elif chave == "formatString" and "formato" in objeto:
+                objeto["formato"] = valor
+            elif chave == "displayFolder" and "pasta" in objeto:
+                objeto["pasta"] = valor
+            elif chave == "dataType" and "tipo_dado" in objeto:
+                objeto["tipo_dado"] = TIPOS_TMDL.get(valor, valor)
+            elif conteudo == "isHidden" and "oculta" in objeto:
+                objeto["oculta"] = True
+        i += 1
+    return tabela
+
+
+def coluna_tmdl(ref: str) -> str:
+    """'Tabela X'.'Coluna Y' ou Tabela.Coluna → Tabela X[Coluna Y]."""
+    m = re.match(r"^('(?:[^']|'')*'|[^.']+)\.(.+)$", ref.strip())
+    if not m:
+        return ref
+    return f"{nome_tmdl(m.group(1))}[{nome_tmdl(m.group(2))}]"
+
+
+def modelo_tmdl(pasta: Path) -> dict:
+    definicao = pasta / "definition"
+    if not definicao.is_dir():
+        if (pasta / "model.bim").is_file():
+            raise Erro("O modelo deste PBIP está em model.bim (formato antigo); ainda não suportado.")
+        raise Erro(f"Não achei a pasta definition do modelo em {pasta}.")
+    tabelas = [t for t in (tabela_tmdl(texto(p.read_bytes()))
+                           for p in sorted((definicao / "tables").glob("*.tmdl"))) if t]
+    # A ordem das tabelas é a do model.tmdl (ref table ...), a mesma do Desktop.
+    if (definicao / "model.tmdl").is_file():
+        ordem = [nome_tmdl(m.group(1)) for m in re.finditer(r"^ref table\s+('(?:[^']|'')*'|\S+)",
+                                                            texto((definicao / "model.tmdl").read_bytes()), re.M)]
+        posicao = {n: i for i, n in enumerate(ordem)}
+        tabelas.sort(key=lambda t: posicao.get(t["nome"], len(posicao)))
+    relacoes = []
+    arq_rel = definicao / "relationships.tmdl"
+    if arq_rel.is_file():
+        atual = None
+        for linha in texto(arq_rel.read_bytes()).replace("\r\n", "\n").split("\n"):
+            conteudo = linha.strip()
+            if conteudo.startswith("relationship "):
+                atual = {"de": None, "para": None, "ativa": True, "direcao": "única", "_de": "many", "_para": "one"}
+                relacoes.append(atual)
+            elif atual is not None and ":" in conteudo:
+                chave, _, valor = conteudo.partition(":")
+                valor = valor.strip()
+                if chave == "fromColumn":
+                    atual["de"] = coluna_tmdl(valor)
+                elif chave == "toColumn":
+                    atual["para"] = coluna_tmdl(valor)
+                elif chave == "isActive":
+                    atual["ativa"] = valor.lower() != "false"
+                elif chave == "crossFilteringBehavior":
+                    atual["direcao"] = "ambas" if valor == "bothDirections" else "única"
+                elif chave == "fromCardinality":
+                    atual["_de"] = valor
+                elif chave == "toCardinality":
+                    atual["_para"] = valor
+        for r in relacoes:
+            r["cardinalidade"] = f"{'1' if r.pop('_de') == 'one' else 'M'}:{'M' if r.pop('_para') == 'many' else '1'}"
+    return {"origem": "TMDL", "tabelas": tabelas, "relacoes": relacoes, "estatisticas": []}
+
+
 def modelo(alvo: dict) -> dict:
     if alvo["tipo"] == "pbip":
         pasta = alvo["fonte_modelo"]
         if not pasta:
             raise Erro("Não achei a pasta .SemanticModel do PBIP.")
-        arquivos = sorted(str(p) for p in (pasta / "definition").rglob("*.tmdl")) if (pasta / "definition").is_dir() else []
-        return {"origem": "TMDL", "pasta": str(pasta), "arquivos_tmdl": arquivos}
+        dados = modelo_tmdl(pasta)
+        dados["fontes"] = fontes_do_m(dados["tabelas"])
+        return dados
     if alvo["tipo"] == "pbit":
         dados = modelo_pbit(alvo["zip"])
     else:
@@ -510,9 +667,6 @@ def modelo(alvo: dict) -> dict:
 
 
 def modelo_texto(d: dict, arquivo: str, tudo: bool) -> str:
-    if d["origem"] == "TMDL":
-        return (f"Modelo do PBIP em TMDL: {d['pasta']}\nLeia os arquivos .tmdl direto ({len(d['arquivos_tmdl'])}):\n"
-                + "\n".join(f"  {a}" for a in d["arquivos_tmdl"]))
     reais = [t for t in d["tabelas"] if tudo or not t["automatica"]]
     autos = [t for t in d["tabelas"] if t["automatica"]]
     n_med = sum(len(t["medidas"]) for t in reais)
@@ -567,6 +721,214 @@ def modelo_texto(d: dict, arquivo: str, tudo: bool) -> str:
     return "\n".join(linhas)
 
 
+# ---------------------------------------------------------------- linhagem
+
+REF_QUALIFICADA = re.compile(r"(?:'((?:[^']|'')+)'|([^\W\d][\w.]*))\s*\[([^\]]+)\]")
+REF_SOLTA = re.compile(r"\[([^\]]+)\]")
+NAVEGACAO_M = re.compile(r'\{\[\s*Schema\s*=\s*"([^"]+)"\s*,\s*Item\s*=\s*"([^"]+)"\s*\]\}'
+                         r'|\{\[\s*(?:Name|Item)\s*=\s*"([^"]+)"[^\]]*\]\}')
+PASSO_M = re.compile(r'^\s*(#"(?:[^"]|"")+"|[^\W\d]\w*)\s*=\s*([A-Z][A-Za-z]*\.[A-Za-z]+)\s*\(', re.M)
+
+
+def limpa_dax(expr: str) -> str:
+    expr = re.sub(r"/\*.*?\*/", " ", expr or "", flags=re.S)
+    expr = re.sub(r'"(?:[^"]|"")*"', '""', expr)
+    return re.sub(r"(//|--)[^\n]*", " ", expr)
+
+
+def refs_dax(expr: str, tabela_dona: str, medidas: dict) -> tuple[set, set]:
+    """Devolve (medidas, colunas) citadas numa expressão DAX. Colunas como 'Tabela[Coluna]'."""
+    texto_dax = limpa_dax(expr)
+    usa_medidas, usa_colunas, ocupado = set(), set(), []
+    for m in REF_QUALIFICADA.finditer(texto_dax):
+        tabela = (m.group(1) or "").replace("''", "'") or m.group(2)
+        nome = m.group(3)
+        ocupado.append(m.span())
+        if nome in medidas and medidas[nome]["tabela"] == tabela:
+            usa_medidas.add(nome)
+        else:
+            usa_colunas.add(f"{tabela}[{nome}]")
+    for m in REF_SOLTA.finditer(texto_dax):
+        if any(a <= m.start() < b for a, b in ocupado):
+            continue
+        nome = m.group(1)
+        if nome in medidas:
+            usa_medidas.add(nome)
+        else:
+            usa_colunas.add(f"{tabela_dona}[{nome}]")
+    return usa_medidas, usa_colunas
+
+
+def origem_m(m_txt: str | None) -> dict:
+    if not m_txt:
+        return {}
+    fontes = [f"{f}({' '.join(a.split())})" for f, a in FONTE_M.findall(m_txt)]
+    nav = NAVEGACAO_M.search(m_txt)
+    objeto = None
+    if nav:
+        objeto = f"{nav.group(1)}.{nav.group(2)}" if nav.group(1) else nav.group(3)
+    passos = [{"passo": p.strip("#").strip('"'), "funcao": f} for p, f in PASSO_M.findall(m_txt)]
+    return {"fontes": fontes, "objeto": objeto, "sql_proprio": bool(re.search(r"\bQuery\s*=", m_txt)),
+            "passos": passos}
+
+
+def linhagem(alvo: dict) -> dict:
+    rel = relatorio(alvo)
+    mod = modelo(alvo)
+    tabelas = {t["nome"]: t for t in mod["tabelas"]}
+    medidas = {ms["nome"]: {**ms, "tabela": t["nome"]} for t in mod["tabelas"] for ms in t["medidas"]}
+    colunas = {f"{t['nome']}[{c['nome']}]": {**c, "tabela": t["nome"]} for t in mod["tabelas"] for c in t["colunas"]}
+
+    deps_medida: dict[str, tuple[set, set]] = {}
+    for nome, ms in medidas.items():
+        deps_medida[nome] = refs_dax(ms["expressao"], ms["tabela"], medidas)
+    deps_coluna = {chave: refs_dax(c["expressao"], c["tabela"], medidas)
+                   for chave, c in colunas.items() if c["calculada"]}
+
+    def fecha(med_iniciais: set, col_iniciais: set) -> tuple[set, set]:
+        meds, cols, fila = set(), set(), list(med_iniciais) + list(col_iniciais)
+        while fila:
+            item = fila.pop()
+            if item in medidas:
+                if item in meds:
+                    continue
+                meds.add(item)
+                fila += list(deps_medida[item][0]) + list(deps_medida[item][1])
+            else:
+                if item in cols:
+                    continue
+                cols.add(item)
+                if item in deps_coluna:
+                    fila += list(deps_coluna[item][0]) + list(deps_coluna[item][1])
+        return meds, cols
+
+    visuais, usados_m, usadas_c, inexistentes = [], set(), set(), set()
+    for p in rel["paginas"]:
+        for v in p["visuais"]:
+            campos = []
+            for papel, lista in v.get("campos", {}).items():
+                for c in lista:
+                    campo = c["campo"]
+                    nome_medida = campo.split("[", 1)[1][:-1] if "[" in campo else campo
+                    if c["tipo"] == "medida" and nome_medida in medidas:
+                        meds, cols = fecha({nome_medida}, set())
+                    elif campo in colunas:
+                        meds, cols = fecha(set(), {campo})
+                    else:
+                        inexistentes.add(campo)
+                        meds, cols = set(), set()
+                    usados_m |= meds
+                    usadas_c |= cols
+                    campos.append({"papel": papel, "campo": campo, "tipo": c["tipo"],
+                                   "agregacao": c.get("agregacao"), "medidas": sorted(meds - {nome_medida}),
+                                   "colunas": sorted(cols), "existe": campo in colunas or nome_medida in medidas})
+            visuais.append({"pagina": p["exibicao"], "visual": v["nome"], "tipo": v["tipo"],
+                            "titulo": v.get("titulo"), "campos": campos})
+
+    tabelas_usadas = {colunas[c]["tabela"] for c in usadas_c if c in colunas} | {medidas[m]["tabela"] for m in usados_m}
+    relacoes_usadas = [r for r in mod["relacoes"]
+                       if r["de"].split("[")[0] in tabelas_usadas or r["para"].split("[")[0] in tabelas_usadas]
+    # Tabela sem campo usado, mas ligada a duas ou mais tabelas usadas: é ponte nas relações (não sobra).
+    vizinhas: dict[str, set] = {}
+    for r in mod["relacoes"]:
+        a, b = r["de"].split("[")[0], r["para"].split("[")[0]
+        vizinhas.setdefault(a, set()).add(b)
+        vizinhas.setdefault(b, set()).add(a)
+    pontes = {t: sorted(v & tabelas_usadas) for t, v in vizinhas.items()
+              if t not in tabelas_usadas and len(v & tabelas_usadas) >= 2}
+    nao_usadas_m = sorted(m for m, ms in medidas.items() if m not in usados_m and not AUTOMATICAS.match(ms["tabela"]))
+    nao_usadas_calc = sorted(c for c, col in colunas.items()
+                             if col["calculada"] and c not in usadas_c and not AUTOMATICAS.match(col["tabela"]))
+    return {
+        "visuais": visuais,
+        "medidas": {m: {"tabela": medidas[m]["tabela"], "expressao": medidas[m]["expressao"],
+                        "formato": medidas[m].get("formato"), "usa_medidas": sorted(deps_medida[m][0]),
+                        "usa_colunas": sorted(deps_medida[m][1])} for m in sorted(usados_m)},
+        "colunas_calculadas": {c: {"expressao": colunas[c]["expressao"],
+                                   "usa": sorted(deps_coluna[c][0] | deps_coluna[c][1])}
+                               for c in sorted(usadas_c) if c in deps_coluna},
+        "tabelas": {t: {**origem_m(tabelas[t].get("m")), "dax": tabelas[t].get("dax")}
+                    for t in sorted(tabelas_usadas) if t in tabelas},
+        "relacoes": relacoes_usadas,
+        "nao_usados": {"medidas": nao_usadas_m, "colunas_calculadas": nao_usadas_calc,
+                       "tabelas": [{"tabela": t, "ponte_entre": pontes.get(t, [])} for t in sorted(
+                           t for t, d in tabelas.items() if t not in tabelas_usadas and not d["automatica"])]},
+        "inexistentes": sorted(inexistentes),
+    }
+
+
+def linhagem_texto(d: dict, arquivo: str) -> str:
+    paginas = list(dict.fromkeys(v["pagina"] for v in d["visuais"]))
+    linhas = [f"Linhagem: {arquivo}",
+              f"Totais: {plural(len(paginas), 'página')} com visuais, {plural(len(d['visuais']), 'visual', 'visuais')}, "
+              f"{plural(len(d['medidas']), 'medida usada', 'medidas usadas')}, "
+              f"{plural(len(d['tabelas']), 'tabela usada', 'tabelas usadas')}",
+              "(visual → campo → medidas → colunas; depois cada medida, cada tabela e a origem)"]
+    pagina = None
+    for v in d["visuais"]:
+        if v["pagina"] != pagina:
+            pagina = v["pagina"]
+            linhas.append(f"\n## {pagina}")
+        titulo = f' "{v["titulo"]}"' if v.get("titulo") else ""
+        linhas.append(f"- {v['tipo']}{titulo} [{v['visual']}]")
+        for c in v["campos"]:
+            extra = []
+            if c.get("agregacao"):
+                extra.append(c["agregacao"])
+            if not c["existe"]:
+                extra.append("NÃO EXISTE NO MODELO")
+            rotulo = f"{c['papel']}: {c['campo']}" + (f" ({', '.join(extra)})" if extra else "")
+            caminho = []
+            if c["medidas"]:
+                caminho.append("medidas " + ", ".join(c["medidas"]))
+            outras = [x for x in c["colunas"] if x != c["campo"]]
+            if outras:
+                rotulo_col = "colunas " if c["tipo"] == "medida" else "coluna calculada, usa "
+                caminho.append(rotulo_col + ", ".join(outras))
+            linhas.append(f"    {rotulo}" + (f" → {'; '.join(caminho)}" if caminho else ""))
+    if d["medidas"]:
+        linhas.append("\n## Medidas usadas")
+        for nome, ms in d["medidas"].items():
+            fmt = f"formato {ms['formato']}" if ms.get("formato") else "SEM FORMATO"
+            linhas.append(f"- {nome} ({ms['tabela']}, {fmt}) = {' '.join((ms['expressao'] or '').split())}")
+    if d["colunas_calculadas"]:
+        linhas.append("\n## Colunas calculadas usadas")
+        for nome, c in d["colunas_calculadas"].items():
+            linhas.append(f"- {nome} = {' '.join((c['expressao'] or '').split())}")
+    linhas.append("\n## Tabelas e origem")
+    for nome, t in d["tabelas"].items():
+        if t.get("dax"):
+            linhas.append(f"- {nome}: tabela calculada em DAX: {' '.join(t['dax'].split())}")
+            continue
+        origem = ", ".join(t.get("fontes") or ["fonte não identificada no M"])
+        objeto = f" → {t['objeto']}" if t.get("objeto") else ""
+        sql = " (consulta SQL escrita à mão)" if t.get("sql_proprio") else ""
+        passos = [p["passo"] for p in t.get("passos", [])[1:]]
+        linhas.append(f"- {nome} ← {origem}{objeto}{sql}" + (f"; passos: {', '.join(passos)}" if passos else ""))
+    if d["relacoes"]:
+        linhas.append("\n## Relações entre as tabelas usadas")
+        for r in d["relacoes"]:
+            if AUTOMATICAS.match(r["para"]):
+                continue
+            marcas = [r["cardinalidade"], "ativa" if r["ativa"] else "INATIVA",
+                      "AMBAS AS DIREÇÕES" if r["direcao"] == "ambas" else "direção única"]
+            linhas.append(f"- {r['de']} → {r['para']} ({', '.join(marcas)})")
+    nu = d["nao_usados"]
+    linhas.append("\n## Não usados por nenhum visual")
+    linhas.append("- medidas: " + (", ".join(nu["medidas"]) or "nenhuma"))
+    linhas.append("- colunas calculadas: " + (", ".join(nu["colunas_calculadas"]) or "nenhuma"))
+    sobras = [t["tabela"] for t in nu["tabelas"] if not t["ponte_entre"]]
+    pontes = [f"{t['tabela']} (ponte entre {' e '.join(t['ponte_entre'])})" for t in nu["tabelas"] if t["ponte_entre"]]
+    linhas.append("- tabelas: " + (", ".join(sobras) or "nenhuma"))
+    if pontes:
+        linhas.append("- tabelas sem campo em visual, mas que ligam outras nas relações (não apagar): "
+                      + ", ".join(pontes))
+    if d["inexistentes"]:
+        linhas.append("\n## Campos dos visuais que não existem no modelo (visual quebrado)")
+        linhas += [f"- {c}" for c in d["inexistentes"]]
+    return "\n".join(linhas)
+
+
 # ---------------------------------------------------------------- linha de comando
 
 PBIXRAY_VERSAO = "0.15.5"  # a mesma do cabeçalho do script; o formato das medidas depende dela
@@ -598,7 +960,8 @@ def principal(argv: list[str]) -> int:
     sub.add_parser("ambiente", help="confere o Python e o PBIXRay")
     for nome, ajuda in (("info", "tipo do arquivo e de qual Desktop veio"),
                         ("relatorio", "páginas, visuais e campos"),
-                        ("modelo", "tabelas, medidas, relações, M e fontes")):
+                        ("modelo", "tabelas, medidas, relações, M e fontes"),
+                        ("linhagem", "de cada visual até a fonte, e o que não é usado")):
         sp = sub.add_parser(nome, help=ajuda)
         sp.add_argument("arquivo")
         sp.add_argument("--json", action="store_true", help="saída em JSON")
@@ -615,10 +978,14 @@ def principal(argv: list[str]) -> int:
         elif a.comando == "relatorio":
             d = relatorio(alvo)
             print(json.dumps(d, ensure_ascii=False, indent=2) if a.json else relatorio_texto(d, a.arquivo))
-        else:
+        elif a.comando == "modelo":
             d = modelo(alvo)
             print(json.dumps(d, ensure_ascii=False, indent=2, default=str) if a.json
                   else modelo_texto(d, a.arquivo, a.tudo))
+        else:
+            d = linhagem(alvo)
+            print(json.dumps(d, ensure_ascii=False, indent=2, default=str) if a.json
+                  else linhagem_texto(d, a.arquivo))
     except Erro as e:
         print(f"Erro: {e}", file=sys.stderr)
         return 1

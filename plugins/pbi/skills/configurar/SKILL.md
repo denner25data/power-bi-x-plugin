@@ -78,4 +78,4 @@ Resuma numa tabela curta o que está pronto e o que falta. Daqui em diante, as s
 - **com uv:** `uv run --script "${CLAUDE_PLUGIN_ROOT}/scripts/pbi.py" <subcomando> <arquivo>`
 - **com pip:** `"${CLAUDE_PLUGIN_DATA}/venv/Scripts/python" "${CLAUDE_PLUGIN_ROOT}/scripts/pbi.py" <subcomando> <arquivo>`
 
-Subcomandos: `ambiente`, `info`, `relatorio`, `modelo` (com `--json` e `--tudo`).
+Subcomandos: `ambiente`, `info`, `relatorio`, `modelo` e `linhagem` (com `--json`; `relatorio` e `modelo` também com `--tudo`).
