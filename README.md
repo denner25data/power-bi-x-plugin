@@ -16,8 +16,8 @@ Este plugin cobre esse caso. Para cada formato, ele sabe o que dá para ler, o q
 |---|---|---|
 | `/pbi:configurar` | prepara a máquina na primeira vez | "configure o plugin pbi" |
 | `/pbi:raio-x` | explica o relatório de cada visual até a tabela no banco | "de onde vem o número do cartão Ticket Médio em vendas.pbix?" |
-| agente `revisor` | revisa modelo, DAX, relações e M; devolve os problemas por prioridade, com o que corrigir | "revise o vendas.pbix" |
-| `/pbi:medida` | cria ou ajusta medidas no padrão da equipe, com testes e uma consulta SQL para conferir | "crie uma medida de margem percentual" |
+| agente `revisor` | revisa modelo, DAX, relações e M; devolve os problemas por prioridade, com o que corrigir e o link da documentação da Microsoft | "revise o vendas.pbix" |
+| `/pbi:medida` | cria ou ajusta medidas no padrão da equipe, com testes e uma consulta SQL para conferir; confere as funções DAX na documentação atual da Microsoft | "crie uma medida de margem percentual" |
 | `/pbi:visual` | muda ou cria visuais e páginas num relatório do Report Server | "na página Produtos, troque a coluna Vendas Produto pela medida Vendas" |
 | `/pbi:diff` | mostra o que mudou entre versões, em português | "o que mudou no vendas.pbix desde o último commit?" |
 | `/pbi:documentar` | gera a documentação em markdown e propõe descrições para o modelo | "documente o vendas.pbit" |
@@ -130,7 +130,7 @@ Para testar mudanças antes de publicar: `claude --plugin-dir plugins/pbi` e, de
 |---|---|
 | `plugins/pbi/scripts/pbi.py` | um script em Python (biblioteca padrão mais o PBIXRay) que lê PBIX, PBIT e PBIP e conduz o fluxo de visuais. Roda com `uv run --script`, que instala o PBIXRay sozinho |
 | `plugins/pbi/hooks/protege-pbix.mjs` | a proteção contra gravar direto em `.pbix` e `.pbit` |
-| `plugins/pbi/.mcp.json` | o [Power BI Authoring MCP](https://github.com/microsoft/powerbi-modeling-mcp) da Microsoft (versão fixa 1.0.1) e o MCP do Microsoft Learn |
+| `plugins/pbi/.mcp.json` | o [Power BI Authoring MCP](https://github.com/microsoft/powerbi-modeling-mcp) da Microsoft (versão fixa 1.0.1) e o MCP do Microsoft Learn, que a `medida` e o `revisor` usam para conferir DAX e boas práticas na documentação atual |
 | `plugins/pbi/skills/` e `plugins/pbi/agents/` | as skills e o agente |
 
 ## Licença e terceiros

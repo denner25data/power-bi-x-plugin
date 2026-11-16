@@ -2,7 +2,7 @@
 name: medida
 description: Cria ou ajusta uma medida DAX num modelo do Power BI (PBIX, PBIT ou PBIP, inclusive do Report Server), no padrão da equipe, com formato, descrição, casos de teste e uma consulta SQL para conferir o número na fonte. Grava pelo MCP do Power BI com o Desktop aberto, ou entrega o código para colar no Desktop. Use quando pedirem para criar, corrigir, otimizar ou explicar uma medida, ou trocar uma coluna calculada por medida.
 argument-hint: "[o que a medida deve calcular] [arquivo, opcional]"
-allowed-tools: Bash(uv run --script "${CLAUDE_PLUGIN_ROOT}/scripts/pbi.py" *) Bash("${CLAUDE_PLUGIN_DATA}/venv/Scripts/python" "${CLAUDE_PLUGIN_ROOT}/scripts/pbi.py" *)
+allowed-tools: Bash(uv run --script "${CLAUDE_PLUGIN_ROOT}/scripts/pbi.py" *) Bash("${CLAUDE_PLUGIN_DATA}/venv/Scripts/python" "${CLAUDE_PLUGIN_ROOT}/scripts/pbi.py" *) mcp__plugin_pbi_learn__microsoft_docs_search mcp__plugin_pbi_learn__microsoft_docs_fetch mcp__plugin_pbi_learn__microsoft_code_sample_search
 ---
 
 # Criar ou ajustar uma medida
@@ -24,6 +24,13 @@ Se houver uma skill de padrões da equipe (a `padroes` do plugin ou uma do proje
 - Use `DIVIDE` em toda divisão, `VAR` para as partes repetidas, e nada de valor fixo no código (ano, código, meta), a menos que a pessoa peça.
 - Defina o **formato** (moeda, porcentagem, inteiro com separador de milhar) e uma **descrição** de uma linha.
 - Se for trocar uma coluna calculada que agrega por medida, mantenha a coluna até a pessoa trocar os visuais (skill `visual` no Report Server), e só então sugira apagar.
+
+**Confira na documentação da Microsoft** pelo MCP `learn` (`microsoft_docs_search`, e `microsoft_docs_fetch` para ler a página inteira) sempre que a medida depender de algo que você não sabe com certeza:
+- como uma função trata vazios, filtros ou contexto de linha;
+- uma função recente (funções de janela como `WINDOW` e `OFFSET`, `INFO.*`, funções definidas pelo usuário, cálculos visuais), que pode não existir no Desktop do Report Server da pessoa;
+- uma opção do Desktop ou do Report Server.
+
+Não precisa buscar o óbvio, como `SUM` ou `DIVIDE`. Ao explicar a medida, cite o link da página que você usou. Se o `learn` não estiver disponível, diga o que não deu para conferir.
 
 Mostre a medida e espere o ok antes de gravar.
 
