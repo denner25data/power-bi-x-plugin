@@ -49,7 +49,7 @@ Não precisa decorar os comandos: pedir em português também funciona, e o Clau
 | **[uv](https://docs.astral.sh/uv/)** (recomendado) ou Python 3.10+ com pip | o script do plugin e o [PBIXRay](https://github.com/Hugoberry/pbixray), que lê PBIX sem abrir o Desktop. Com uv, nem precisa de Python instalado |
 | Node.js LTS | o MCP do Power BI (pelo `npx`) e a proteção que impede gravar direto nos arquivos |
 
-O plugin é feito para **Windows**, como o Power BI Desktop. O MCP do Power BI não roda no macOS.
+O plugin é feito para **Windows**, como o Power BI Desktop. O MCP do Power BI, na versão local que o plugin usa, não tem suporte no macOS.
 
 Para instalar o uv no Windows:
 
@@ -75,7 +75,7 @@ Prefere o pip? O `/pbi:configurar` cria um ambiente isolado na pasta de dados do
 - **Nunca grava direto num `.pbix` ou `.pbit`.** Um hook bloqueia gravar, apagar, mover ou copiar esses arquivos, tanto pelas ferramentas de edição quanto pelo terminal. A única exceção é o script do próprio plugin.
 - **O modelo de um PBIX muda pelo Desktop.** Pelo MCP do Power BI, o Claude Code pede sua permissão antes de cada gravação, e nada chega ao arquivo antes do seu Ctrl+S. Se preferir, o Claude entrega o código para você colar na exibição de consulta DAX ou na TMDL view.
 - **Quem atualiza os dados é você.** Depois de mudar uma consulta M ou criar uma coluna calculada, o Claude pede para você atualizar a tabela no Desktop. Ele não manda o Desktop recarregar, porque a Microsoft não dá suporte a isso.
-- **Num PBIP com o projeto fechado, o Claude edita os arquivos de texto do modelo**, e o Git mostra cada linha que mudou. Com o projeto aberto, ele usa o MCP, como no PBIX, porque o Ctrl+S do Desktop gravaria por cima.
+- **Num PBIP com o projeto fechado, o Claude edita os arquivos de texto do modelo**, e o Git mostra cada linha que mudou. Com o projeto aberto, ele usa o MCP, como no PBIX, porque o Desktop e a edição por fora podem gravar um por cima do outro.
 - **Visuais do Report Server, pelo fluxo guiado:**
   1. o plugin gera uma cópia editada numa pasta temporária;
   2. abre a cópia no seu Desktop;
@@ -120,7 +120,7 @@ Para testar mudanças antes de publicar: `claude --plugin-dir plugins/pbi` e, de
 
 ## Limitações conhecidas
 
-- **MCP no Desktop do Report Server:** funciona, mas a Microsoft não dá suporte a ferramentas externas nessa versão do Desktop. Uma atualização pode quebrar. O caminho de colar o código no Desktop continua valendo.
+- **MCP no Desktop do Report Server:** a Microsoft não cita o Report Server nas páginas do MCP. Ela diz que o MCP segue as regras das ferramentas externas, e que ferramentas externas não têm suporte no Desktop do Report Server. Nos nossos testes, no Desktop do Report Server de setembro de 2026, o MCP funcionou, mas uma atualização pode quebrar. O caminho de colar o código no Desktop continua valendo.
 - **Formato antigo do relatório** (`Report/Layout`, o do Report Server): a Microsoft não documenta esse formato. O fluxo de visuais foi testado no Desktop do Report Server de setembro de 2026.
 - **Mudar visuais** só em PBIX e PBIT do Report Server. Para PBIP, use o plugin da Microsoft.
 - **M que mexe nas colunas** (cria, renomeia ou muda o tipo) vai pelo Editor avançado do Desktop. Pelo MCP, as colunas do modelo não acompanham sozinhas.

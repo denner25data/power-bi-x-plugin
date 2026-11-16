@@ -53,7 +53,7 @@ Escreva também uma **consulta SQL** que recalcula o número direto na fonte. A 
 
 ## 4. Gravar
 
-**Com o Desktop aberto e o MCP `powerbi` disponível** (o caminho padrão; funciona também no Desktop do Report Server, mas sem suporte oficial da Microsoft):
+**Com o Desktop aberto e o MCP `powerbi` disponível** (o caminho padrão; no Desktop do Report Server, funcionou nos testes, mas a Microsoft não documenta esse uso):
 
 1. `connection_operations` com `ListLocalInstances`. Ache o Desktop pelo título da janela, que tem o nome do arquivo, e conecte com `Connect` e `connectionString` igual a `data source=localhost:<porta>`.
 2. `measure_operations` com `Create` ou `Update`, passando `tableName`, `name`, `expression`, `formatString`, `description` e `displayFolder`.
@@ -63,8 +63,8 @@ Escreva também uma **consulta SQL** que recalcula o número direto na fonte. A 
 Se o MCP pedir a EULA, ou se não estiver configurado, mande para a skill `configurar`. Nunca aceite a EULA sem a pessoa pedir.
 
 **PBIP com o projeto fechado no Desktop:** grave direto no arquivo da tabela, `<nome>.SemanticModel/definition/tables/<Tabela>.tmdl`. O Git mostra só as linhas que mudaram.
-1. Confira que o projeto não está aberto. Com o MCP, `ListLocalInstances` mostra o nome do projeto no título da janela. Sem ele, pergunte. Se estiver aberto, use o caminho acima, porque o Ctrl+S do Desktop gravaria por cima da sua edição.
-2. Acrescente ou troque a medida no padrão das outras do arquivo: uma tab antes de `measure`, duas antes das propriedades e a descrição em `///` na linha de cima. Não precisa de `lineageTag`, que o Desktop cria quando salva. Exemplo:
+1. Confira que o projeto não está aberto. Com o MCP, `ListLocalInstances` mostra o nome do projeto no título da janela. Sem ele, pergunte. Se estiver aberto, use o caminho acima: segundo a Microsoft, o Desktop e quem edita por fora podem gravar um por cima do outro.
+2. Acrescente ou troque a medida no padrão das outras do arquivo: uma tab antes de `measure`, duas antes das propriedades e a descrição em `///` na linha de cima. Não precisa de `lineageTag`: o Desktop cria um ao abrir o projeto. Exemplo:
 
 ```tmdl
 	/// Valor médio de cada pedido.

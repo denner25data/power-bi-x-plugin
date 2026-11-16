@@ -1,6 +1,6 @@
 {
   "name": "pbi",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Entender e manter relatórios Power BI em PBIX, PBIT e PBIP, inclusive do Power BI Report Server: raio-x do visual até a fonte, revisão de boas práticas, medidas, visuais do Report Server, diff entre versões e documentação, sem gravar direto nos arquivos.",
   "author": {
     "name": "denner25data",
