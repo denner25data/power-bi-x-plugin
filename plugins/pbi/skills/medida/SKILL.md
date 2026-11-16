@@ -62,6 +62,20 @@ Escreva também uma **consulta SQL** que recalcula o número direto na fonte. A 
 
 Se o MCP pedir a EULA, ou se não estiver configurado, mande para a skill `configurar`. Nunca aceite a EULA sem a pessoa pedir.
 
+**PBIP com o projeto fechado no Desktop:** grave direto no arquivo da tabela, `<nome>.SemanticModel/definition/tables/<Tabela>.tmdl`. O Git mostra só as linhas que mudaram.
+1. Confira que o projeto não está aberto. Com o MCP, `ListLocalInstances` mostra o nome do projeto no título da janela. Sem ele, pergunte. Se estiver aberto, use o caminho acima, porque o Ctrl+S do Desktop gravaria por cima da sua edição.
+2. Acrescente ou troque a medida no padrão das outras do arquivo: uma tab antes de `measure`, duas antes das propriedades e a descrição em `///` na linha de cima. Não precisa de `lineageTag`, que o Desktop cria quando salva. Exemplo:
+
+```tmdl
+	/// Valor médio de cada pedido.
+	measure 'Ticket Médio' = DIVIDE ( [Vendas], [Qtd Pedidos] )
+		formatString: \$#,0.00;(\$#,0.00);\$#,0.00
+		displayFolder: Vendas
+```
+
+3. Com o MCP disponível, confira a sintaxe com `connection_operations` e `ConnectFolder` na pasta `.SemanticModel`. Se houver erro, ele diz o arquivo e a linha.
+4. Peça para a pessoa abrir o `.pbip` no Desktop. Aí conecte o MCP ao Desktop, rode os casos de teste e peça o Ctrl+S.
+
 **Sem MCP, ou com o MCP em modo de leitura** (opção `modo_mcp`): entregue o código para colar.
 - **Exibição de consulta DAX**, o mais simples:
   1. A pessoa cola o bloco abaixo e roda.

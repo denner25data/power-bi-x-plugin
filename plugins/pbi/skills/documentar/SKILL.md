@@ -34,6 +34,7 @@ Não invente o significado de negócio. Quando o nome não deixar claro, escreva
 
 Proponha uma descrição de uma linha para cada medida e tabela sem descrição, e mostre a lista para a pessoa aprovar. Depois:
 - **com o Desktop aberto e o MCP `powerbi`:** `measure_operations` e `table_operations` com `Update` e o campo `description`. Depois, Ctrl+S (num PBIT, exportar de novo);
+- **num PBIP com o projeto fechado no Desktop:** escreva as linhas `/// descrição` direto nos `.tmdl` das tabelas, acima de cada medida e de cada tabela, como no passo de gravar da skill `medida`;
 - **sem MCP:** entregue as linhas `/// descrição` para a pessoa pôr acima de cada medida ou tabela na TMDL view (arrastar a tabela, editar, Visualizar e Aplicar).
 
 As descrições aparecem para quem passa o mouse sobre o campo no Desktop e ajudam o próximo raio-x.

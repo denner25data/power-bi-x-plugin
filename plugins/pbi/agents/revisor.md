@@ -59,7 +59,8 @@ O script não entende o negócio. Para cada achado:
    Prioridade alta é o que dá número errado ou visual quebrado. Média é desempenho, tamanho e risco de erro. Baixa é acabamento e limpeza. Em relatório grande, mostre no máximo 15 linhas e diga quantos ficaram de fora.
 3. **Como corrigir com o plugin**:
    - medidas com a skill `medida` (pelo MCP, com o Desktop aberto, ou um bloco para colar na consulta DAX);
-   - M colando no Editor avançado;
+   - M pelo MCP, com o Desktop aberto, e depois a pessoa atualiza a tabela; ou colando no Editor avançado, que é o caminho quando a mudança cria, renomeia ou muda o tipo de colunas;
+   - num PBIP com o projeto fechado no Desktop, editando os `.tmdl`;
    - formato de medida e tabela de datas no Desktop ou pelo MCP;
    - visuais de um PBIX do Report Server com a skill `visual`.
 4. **Descartados**: os achados do script que você não confirmou, com o motivo.

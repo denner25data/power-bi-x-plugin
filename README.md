@@ -66,13 +66,16 @@ Prefere o pip? O `/pbi:configurar` cria um ambiente isolado na pasta de dados do
 | Entender o relatório e o modelo | sim, sem abrir o Desktop | sim | sim, sem dados | sim |
 | Revisar e comparar versões | sim | sim | sim | sim |
 | Conferir números com DAX | com o Desktop aberto | com o Desktop aberto | não tem dados | com o Desktop aberto |
-| Criar e mudar medidas | pelo MCP com o Desktop aberto, ou colando no Desktop | pelo MCP ou colando | abrindo no Desktop e exportando o PBIT de novo | pelo MCP |
+| Criar e mudar medidas | pelo MCP com o Desktop aberto, ou colando no Desktop | pelo MCP ou colando | abrindo no Desktop e exportando o PBIT de novo | pelo MCP com o Desktop aberto, ou editando o TMDL com o projeto fechado |
+| Mudar consultas M | pelo MCP com o Desktop aberto (você atualiza a tabela), ou colando no Editor avançado | igual | abrindo no Desktop e exportando o PBIT de novo | igual ao PBIX, ou editando o TMDL com o projeto fechado |
 | Criar e mudar visuais | sim, pelo fluxo guiado | não nesta versão | sim, se for do Report Server | não nesta versão |
 
 ## Como o plugin protege seus arquivos
 
 - **Nunca grava direto num `.pbix` ou `.pbit`.** Um hook bloqueia gravar, apagar, mover ou copiar esses arquivos, tanto pelas ferramentas de edição quanto pelo terminal. A única exceção é o script do próprio plugin.
-- **O modelo muda pelo Desktop.** Pelo MCP do Power BI, o Claude Code pede sua permissão antes de cada gravação, e nada chega ao arquivo antes do seu Ctrl+S. Se preferir, o Claude entrega o código para você colar na exibição de consulta DAX ou na TMDL view.
+- **O modelo de um PBIX muda pelo Desktop.** Pelo MCP do Power BI, o Claude Code pede sua permissão antes de cada gravação, e nada chega ao arquivo antes do seu Ctrl+S. Se preferir, o Claude entrega o código para você colar na exibição de consulta DAX ou na TMDL view.
+- **Quem atualiza os dados é você.** Depois de mudar uma consulta M ou criar uma coluna calculada, o Claude pede para você atualizar a tabela no Desktop. Ele não manda o Desktop recarregar, porque a Microsoft não dá suporte a isso.
+- **Num PBIP com o projeto fechado, o Claude edita os arquivos de texto do modelo**, e o Git mostra cada linha que mudou. Com o projeto aberto, ele usa o MCP, como no PBIX, porque o Ctrl+S do Desktop gravaria por cima.
 - **Visuais do Report Server, pelo fluxo guiado:**
   1. o plugin gera uma cópia editada numa pasta temporária;
   2. abre a cópia no seu Desktop;
@@ -120,6 +123,7 @@ Para testar mudanças antes de publicar: `claude --plugin-dir plugins/pbi` e, de
 - **MCP no Desktop do Report Server:** funciona, mas a Microsoft não dá suporte a ferramentas externas nessa versão do Desktop. Uma atualização pode quebrar. O caminho de colar o código no Desktop continua valendo.
 - **Formato antigo do relatório** (`Report/Layout`, o do Report Server): a Microsoft não documenta esse formato. O fluxo de visuais foi testado no Desktop do Report Server de setembro de 2026.
 - **Mudar visuais** só em PBIX e PBIT do Report Server. Para PBIP, use o plugin da Microsoft.
+- **M que mexe nas colunas** (cria, renomeia ou muda o tipo) vai pelo Editor avançado do Desktop. Pelo MCP, as colunas do modelo não acompanham sozinhas.
 - **Formato das medidas num PBIX** vem de uma parte interna do PBIXRay, por isso a versão dele é fixa (0.15.5).
 - **PBIT e PBIP** não têm dados: sem tamanho de colunas nem amostras.
 - **PBIP com o relatório em `report.json`** (formato antigo do PBIP) não é suportado. Salve o projeto em PBIR.
