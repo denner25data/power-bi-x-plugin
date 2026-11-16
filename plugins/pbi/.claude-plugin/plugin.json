@@ -9,5 +9,14 @@
   "homepage": "https://github.com/denner25data/power-bi-x-plugin",
   "repository": "https://github.com/denner25data/power-bi-x-plugin",
   "license": "MIT",
-  "keywords": ["power-bi", "pbix", "pbit", "pbip", "dax", "power-query", "report-server"]
+  "keywords": ["power-bi", "pbix", "pbit", "pbip", "dax", "power-query", "report-server"],
+  "userConfig": {
+    "modo_mcp": {
+      "type": "string",
+      "title": "Modo do MCP do Power BI",
+      "description": "readwrite: o Claude também grava no modelo aberto no Desktop (o Claude Code pede permissão antes de cada gravação, e nada chega ao arquivo antes do Ctrl+S). readonly: o MCP só lê.",
+      "options": ["readwrite", "readonly"],
+      "default": "readwrite"
+    }
+  }
 }
