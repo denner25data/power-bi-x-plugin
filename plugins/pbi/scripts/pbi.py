@@ -502,7 +502,7 @@ def modelo_pbix(caminho: Path) -> dict:
         medidas = []
         for _, ms in m.dax_measures[m.dax_measures["TableName"] == nome].iterrows():
             fmt = formatos.get((nome, ms["Name"]))
-            medidas.append({"nome": ms["Name"], "expressao": ms["Expression"],
+            medidas.append({"nome": ms["Name"], "expressao": None if vazio(ms.get("Expression")) else ms["Expression"],
                             "formato": None if vazio(fmt) else fmt,
                             "pasta": None if vazio(ms.get("DisplayFolder")) else ms["DisplayFolder"],
                             "descricao": None if vazio(ms.get("Description")) else ms["Description"]})
