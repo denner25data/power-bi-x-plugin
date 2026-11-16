@@ -24,7 +24,7 @@ Este plugin cobre esse caso. Para cada formato, ele sabe o que dá para ler, o q
 | `padroes` | as regras da sua equipe: nomes, formatos, DAX, M, fontes e glossário | vem com um exemplo para você trocar |
 | `formatos` | o que o Claude precisa saber sobre cada formato (usada automaticamente) | |
 
-Não precisa decorar os comandos: pedir em português também funciona, e o Claude escolhe a peça certa.
+Não precisa decorar os comandos: pedir em português também funciona, e o Claude escolhe a peça certa. Quando é o Claude que escolhe, o Claude Code pode pedir sua permissão antes de usar a skill. Na primeira vez que um comando do plugin rodar, ele também pede, e dá para marcar para não perguntar de novo.
 
 ## Instalação
 
@@ -36,6 +36,7 @@ Não precisa decorar os comandos: pedir em português também funciona, e o Clau
    /plugin install pbi@power-bi-x
    ```
 
+   O instalador avisa que a opção `modo_mcp` ainda não foi configurada. Pode ignorar: o padrão (`readwrite`) já vale. Para mudar, veja "Opções".
 3. Rode `/pbi:configurar`. Ele confere o que falta e prepara o ambiente do Python com o PBIXRay.
 4. Na primeira vez que o Claude usar o MCP do Power BI, ele mostra a [EULA da Microsoft](https://go.microsoft.com/fwlink/?LinkId=2381247). O aceite é seu: o Claude nunca aceita sozinho.
 
